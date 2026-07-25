@@ -12,7 +12,7 @@ import { buildCalendar, rollup } from "@/lib/engine";
 import { validateTimesheet } from "@/lib/validate";
 
 export default function DashboardClient({ profile }) {
-  const supabase = createClient();
+  const api = createClient();
   const uid = profile.id;
   const fileInput = useRef(null);
 
@@ -117,7 +117,7 @@ export default function DashboardClient({ profile }) {
     if (storedRef.current?.fileName === f.name) return storedRef.current.path;
     const ext = f.name.includes(".") ? f.name.split(".").pop() : "bin";
     const path = `${uid}/${year}-${String(month).padStart(2, "0")}/${Date.now()}.${ext}`;
-    const { error } = await supabase.storage.from("ts-uploads").upload(path, f, {
+    const { error } = await api.storage.from("ts-uploads").upload(path, f, {
       contentType: f.type || "application/octet-stream", upsert: true,
     });
     // Only memoize on success, so a retry actually re-uploads instead of
@@ -231,7 +231,7 @@ export default function DashboardClient({ profile }) {
   async function saveBaseline({ cal, emp, storagePath, file, aiStatus, confidence }) {
     let fileId = null;
     if (storagePath && file) {
-      const { data: fr, error: fileErr } = await supabase
+      const { data: fr, error: fileErr } = await api
         .from("ts_files")
         .insert({
           user_id: uid, month, year, file_name: file.name,
@@ -243,7 +243,7 @@ export default function DashboardClient({ profile }) {
       fileId = fr?.id || null;
     }
     const r = rollup(cal);
-    const { data: tr, error: tsErr } = await supabase
+    const { data: tr, error: tsErr } = await api
       .from("ts_timesheets")
       .upsert(
         {
@@ -283,7 +283,7 @@ export default function DashboardClient({ profile }) {
     try {
       const tid = await ensureTimesheet();
       const r = rollup(calendar);
-      const { error } = await supabase.from("ts_employee_edits").insert({
+      const { error } = await api.from("ts_employee_edits").insert({
         timesheet_id: tid, user_id: uid, month, year,
         fields: { ...fields, totals: r,
                   flow: aiMeta?.flow || null, agent_trace: aiMeta?.agentTrace || null,
@@ -295,7 +295,7 @@ export default function DashboardClient({ profile }) {
       });
       if (error) throw error;
       // keep ts_timesheets totals in sync with the latest edit
-      await supabase.from("ts_timesheets").update({
+      await api.from("ts_timesheets").update({
         monthly_regular: r.regular, monthly_overtime: r.overtime,
         monthly_total: r.total, days_worked: r.daysWorked,
         questionnaire: { ...q, holidayWork },

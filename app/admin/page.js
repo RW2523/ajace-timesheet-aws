@@ -5,13 +5,13 @@ import AdminClient from "@/components/AdminClient";
 export const dynamic = "force-dynamic";
 
 export default async function AdminPage() {
-  const supabase = await createClient();
+  const api = await createClient();
   const {
     data: { user },
-  } = await supabase.auth.getUser();
+  } = await api.auth.getUser();
   if (!user) redirect("/login");
 
-  const { data: profile } = await supabase
+  const { data: profile } = await api
     .from("ts_profiles").select("*").eq("id", user.id).single();
   if (!profile || profile.role !== "admin") {
     redirect("/dashboard");
@@ -19,12 +19,12 @@ export default async function AdminPage() {
 
   const [{ data: profiles }, { data: edits }, { data: timesheets }, { data: files }, { data: adminEdits }, { data: flowRow }] =
     await Promise.all([
-      supabase.from("ts_profiles").select("*").order("full_name"),
-      supabase.from("ts_employee_edits").select("*").order("created_at", { ascending: false }),
-      supabase.from("ts_timesheets").select("*").order("created_at", { ascending: false }),
-      supabase.from("ts_files").select("*").order("created_at", { ascending: false }),
-      supabase.from("ts_admin_edits").select("*").order("created_at", { ascending: false }),
-      supabase.from("ts_app_settings").select("value").eq("key", "ai_flow").single(),
+      api.from("ts_profiles").select("*").order("full_name"),
+      api.from("ts_employee_edits").select("*").order("created_at", { ascending: false }),
+      api.from("ts_timesheets").select("*").order("created_at", { ascending: false }),
+      api.from("ts_files").select("*").order("created_at", { ascending: false }),
+      api.from("ts_admin_edits").select("*").order("created_at", { ascending: false }),
+      api.from("ts_app_settings").select("value").eq("key", "ai_flow").single(),
     ]);
 
   return (

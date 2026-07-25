@@ -10,10 +10,10 @@ export const maxDuration = 120;
 // engine — or if it fails — respond 200 with a graceful "no in-browser preview"
 // doc instead of a 5xx: preview is a convenience, never an error.
 export async function POST(request) {
-  const supabase = await createClient();
+  const api = await createClient();
   const {
     data: { user },
-  } = await supabase.auth.getUser();
+  } = await api.auth.getUser();
   if (!user) return NextResponse.json({ error: "not authenticated" }, { status: 401 });
 
   let form;

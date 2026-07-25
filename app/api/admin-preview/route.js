@@ -8,13 +8,13 @@ export const maxDuration = 120;
 // format -> PDF -> PNGs via the engine) so an admin can verify a submission
 // against the original document.
 export async function POST(request) {
-  const supabase = await createClient();
+  const api = await createClient();
   const {
     data: { user },
-  } = await supabase.auth.getUser();
+  } = await api.auth.getUser();
   if (!user) return NextResponse.json({ error: "not authenticated" }, { status: 401 });
 
-  const { data: prof } = await supabase
+  const { data: prof } = await api
     .from("ts_profiles").select("role").eq("id", user.id).single();
   if (prof?.role !== "admin") {
     return NextResponse.json({ error: "admin only" }, { status: 403 });
@@ -39,7 +39,7 @@ export async function POST(request) {
   // Office files still need the engine's renderer; without one, return the
   // signed URL as a download so the admin can open the original.
   if (kind !== "other" || !process.env.ENGINE_URL) {
-    const { data: signed, error: serr } = await supabase.storage
+    const { data: signed, error: serr } = await api.storage
       .from("ts-uploads").createSignedUrl(path, 600);
     if (serr || !signed?.signedUrl) {
       return NextResponse.json({ error: "file not found in storage" }, { status: 404 });
@@ -47,7 +47,7 @@ export async function POST(request) {
     return NextResponse.json({ doc: { url: signed.signedUrl, kind, fileName } });
   }
 
-  const { data: blob, error } = await supabase.storage.from("ts-uploads").download(path);
+  const { data: blob, error } = await api.storage.from("ts-uploads").download(path);
   if (error || !blob) {
     return NextResponse.json({ error: "file not found in storage" }, { status: 404 });
   }

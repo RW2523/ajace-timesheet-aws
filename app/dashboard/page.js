@@ -5,13 +5,13 @@ import DashboardClient from "@/components/DashboardClient";
 export const dynamic = "force-dynamic";
 
 export default async function DashboardPage() {
-  const supabase = await createClient();
+  const api = await createClient();
   const {
     data: { user },
-  } = await supabase.auth.getUser();
+  } = await api.auth.getUser();
   if (!user) redirect("/login");
 
-  let { data: profile } = await supabase
+  let { data: profile } = await api
     .from("ts_profiles")
     .select("*")
     .eq("id", user.id)

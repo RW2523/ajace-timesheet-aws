@@ -6,10 +6,10 @@ export const maxDuration = 300; // allow long LLM runs
 
 export async function POST(request) {
   // must be signed in
-  const supabase = await createClient();
+  const api = await createClient();
   const {
     data: { user },
-  } = await supabase.auth.getUser();
+  } = await api.auth.getUser();
   if (!user) {
     return NextResponse.json({ error: "not authenticated" }, { status: 401 });
   }
@@ -34,7 +34,7 @@ export async function POST(request) {
   // before. The admin setting wins; this is only the fallback when no row exists.
   let flow = "consensus";
   try {
-    const { data: fs } = await supabase
+    const { data: fs } = await api
       .from("ts_app_settings").select("value").eq("key", "ai_flow").single();
     if (["direct","premium_plus","budget","premium","consensus","direct_serverless"]
         .includes(fs?.value)) flow = fs.value;

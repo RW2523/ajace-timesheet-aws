@@ -1,12 +1,12 @@
 -- =============================================================================
 -- AJACE Timesheet (Direct++) — AWS-native schema for Amazon RDS PostgreSQL.
--- No Supabase: no RLS, no auth.* schema, no PostgREST. Identity lives in
+-- Self-contained: no RLS and no auth.* schema. Identity lives in
 -- auth_users; per-user scoping is enforced in the app (lib/aws/data.js).
 -- Apply once:  psql "$DATABASE_URL" -f schema.sql
 -- =============================================================================
 create extension if not exists pgcrypto;   -- gen_random_uuid()
 
--- ---------- identity (replaces Supabase auth.users) --------------------------
+-- ---------- identity ---------------------------------------------------------
 create table if not exists public.auth_users (
   id             uuid primary key default gen_random_uuid(),
   email          text unique not null,

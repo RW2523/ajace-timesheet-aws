@@ -13,8 +13,8 @@ export default function Topbar({ profile, active }) {
     .toUpperCase();
 
   async function logout() {
-    const supabase = createClient();
-    await supabase.auth.signOut();
+    const api = createClient();
+    await api.auth.signOut();
     router.replace("/login");
   }
 

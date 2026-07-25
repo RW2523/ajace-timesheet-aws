@@ -9,7 +9,7 @@ import { periodLabel } from "@/lib/month";
 import { rollup } from "@/lib/engine";
 
 export default function AdminClient({ profile, profiles, edits, timesheets, files, adminEdits, aiFlow = "premium" }) {
-  const supabase = createClient();
+  const api = createClient();
   const router = useRouter();
   const pmap = useMemo(() => Object.fromEntries(profiles.map((p) => [p.id, p])), [profiles]);
   const [tab, setTab] = useState("submissions");
@@ -86,7 +86,7 @@ export default function AdminClient({ profile, profiles, edits, timesheets, file
           <div className="tile"><div className="v" style={{ color: flagged ? "var(--red)" : "var(--green)" }}>{flagged}</div><div className="l">With errors</div></div>
         </div>
 
-        <FlowPicker supabase={supabase} adminId={profile.id} initial={aiFlow} />
+        <FlowPicker api={api} adminId={profile.id} initial={aiFlow} />
 
         <div className="tabs">
           {[["submissions", "Submissions"], ["employees", "Employees"], ["files", "Files"], ["revisions", "Admin revisions"]].map(([k, label]) => (
@@ -171,7 +171,7 @@ export default function AdminClient({ profile, profiles, edits, timesheets, file
                   <td className="muted">{f.mime_type || "—"}</td>
                   <td className="muted">{f.size_bytes ? Math.round(f.size_bytes / 1024) + " KB" : "—"}</td>
                   <td className="muted" style={{ fontSize: 12 }}>{fmt(f.created_at)}</td>
-                  <td><DownloadBtn supabase={supabase} path={f.storage_path} /></td>
+                  <td><DownloadBtn api={api} path={f.storage_path} /></td>
                 </tr>
               );
             })}
@@ -203,7 +203,7 @@ export default function AdminClient({ profile, profiles, edits, timesheets, file
           edit={detail} profile={pmap[detail.user_id] || {}} adminProfile={profile}
           sourceFile={files.find((f) => f.user_id === detail.user_id
             && f.month === detail.month && f.year === detail.year)}
-          supabase={supabase} onClose={() => setDetail(null)}
+          api={api} onClose={() => setDetail(null)}
           onSaved={() => { setDetail(null); router.refresh(); }}
         />
       )}
@@ -211,7 +211,7 @@ export default function AdminClient({ profile, profiles, edits, timesheets, file
   );
 }
 
-function SubmissionDetail({ edit, profile, adminProfile, sourceFile, supabase, onClose, onSaved }) {
+function SubmissionDetail({ edit, profile, adminProfile, sourceFile, api, onClose, onSaved }) {
   const [days, setDays] = useState(edit.days || []);
   const [dayIdx, setDayIdx] = useState(null);
   const [note, setNote] = useState("");
@@ -238,7 +238,7 @@ function SubmissionDetail({ edit, profile, adminProfile, sourceFile, supabase, o
 
   async function saveAdminEdit() {
     setSaving(true);
-    const { error } = await supabase.from("ts_admin_edits").insert({
+    const { error } = await api.from("ts_admin_edits").insert({
       timesheet_id: edit.timesheet_id, employee_user_id: edit.user_id,
       admin_user_id: adminProfile.id, month: edit.month, year: edit.year,
       fields: { ...(edit.fields || {}), totals: r }, days,
@@ -324,7 +324,7 @@ function SubmissionDetail({ edit, profile, adminProfile, sourceFile, supabase, o
           </div>
         </div>
         {preview && sourceFile && (
-          <DocPreviewPanel supabase={supabase} path={sourceFile.storage_path}
+          <DocPreviewPanel api={api} path={sourceFile.storage_path}
             fileName={sourceFile.file_name} onClose={() => setPreview(false)} />
         )}
         </div>
@@ -393,7 +393,7 @@ function AgentTrace({ trace, flow }) {
 // Inline source-document preview PANEL: renders the stored file to scrollable
 // page images (via the admin-preview route -> engine) and sits on the RIGHT of
 // the submission detail so an admin can verify against the original side-by-side.
-function DocPreviewPanel({ supabase, path, fileName, onClose }) {
+function DocPreviewPanel({ api, path, fileName, onClose }) {
   const [pages, setPages] = useState([]);
   const [doc, setDoc] = useState(null);   // { url, kind } browser-native preview
   const [loading, setLoading] = useState(true);
@@ -424,7 +424,7 @@ function DocPreviewPanel({ supabase, path, fileName, onClose }) {
   }, [path]);
 
   async function openOriginal() {
-    const { data } = await supabase.storage.from("ts-uploads").createSignedUrl(path, 120);
+    const { data } = await api.storage.from("ts-uploads").createSignedUrl(path, 120);
     if (data?.signedUrl) window.open(data.signedUrl, "_blank");
   }
 
@@ -476,7 +476,7 @@ function DocPreviewPanel({ supabase, path, fileName, onClose }) {
 }
 
 // Admin control: which AI flow processes employee uploads.
-function FlowPicker({ supabase, adminId, initial }) {
+function FlowPicker({ api, adminId, initial }) {
   const [flow, setFlow] = useState(initial);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState("");
@@ -485,7 +485,7 @@ function FlowPicker({ supabase, adminId, initial }) {
     if (next === flow || saving) return;
     setSaving(true); setSaved("");
     // updated_at is refreshed server-side on conflict; there is no updated_by column
-    const { error } = await supabase.from("ts_app_settings").upsert(
+    const { error } = await api.from("ts_app_settings").upsert(
       { key: "ai_flow", value: next },
       { onConflict: "key" }
     );
@@ -542,11 +542,11 @@ function FlowPicker({ supabase, adminId, initial }) {
   );
 }
 
-function DownloadBtn({ supabase, path }) {
+function DownloadBtn({ api, path }) {
   const [busy, setBusy] = useState(false);
   async function dl() {
     setBusy(true);
-    const { data } = await supabase.storage.from("ts-uploads").createSignedUrl(path, 120);
+    const { data } = await api.storage.from("ts-uploads").createSignedUrl(path, 120);
     setBusy(false);
     if (data?.signedUrl) window.open(data.signedUrl, "_blank");
   }

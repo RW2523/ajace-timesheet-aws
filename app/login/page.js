@@ -14,8 +14,8 @@ export default function LoginPage() {
     e.preventDefault();
     setErr("");
     setBusy(true);
-    const supabase = createClient();
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const api = createClient();
+    const { error } = await api.auth.signInWithPassword({ email, password });
     if (error) {
       setErr(error.message);
       setBusy(false);

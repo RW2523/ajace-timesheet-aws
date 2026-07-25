@@ -18,8 +18,8 @@ export default function SignupPage() {
   async function onSubmit(e) {
     e.preventDefault();
     setErr(""); setMsg(""); setBusy(true);
-    const supabase = createClient();
-    const { data, error } = await supabase.auth.signUp({
+    const api = createClient();
+    const { data, error } = await api.auth.signUp({
       email: f.email,
       password: f.password,
       options: {
@@ -35,7 +35,7 @@ export default function SignupPage() {
     // timesheet signups are auto-confirmed server-side; if signUp didn't return a
     // session, sign in directly so the user lands on their dashboard.
     if (!data.session) {
-      const { error: e2 } = await supabase.auth.signInWithPassword({
+      const { error: e2 } = await api.auth.signInWithPassword({
         email: f.email, password: f.password,
       });
       if (e2) {
