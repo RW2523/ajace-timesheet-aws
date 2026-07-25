@@ -214,3 +214,87 @@ table.tbl tr:hover td { background: var(--surface-2); }
 @media (prefers-reduced-motion: reduce) {
   .success-check { animation: none; }
 }
+
+/* ==========================================================================
+   MOBILE  (Tier 4)
+   Employees fill timesheets on a phone. The stylesheet previously had three
+   layout breakpoints (.grid-2, .tiles, .split) and none for the topbar, the
+   page container, tables, modals, or the calendar — so every authenticated
+   page scrolled sideways and the calendar, the primary input surface, was
+   unusable: a 7-column grid of 74px-min cells inside a 375px viewport.
+   ========================================================================== */
+@media (max-width: 720px) {
+  .container { padding: 0 14px; }
+
+  /* header wraps instead of forcing the page wider than the screen */
+  .topbar-inner { height: auto; flex-wrap: wrap; gap: 8px; padding: 10px 0; }
+  .topbar-actions { gap: 8px; }
+  .brand .sub { display: none; }
+  .userchip span:not(.avatar):not(.badge) { display: none; }  /* keep avatar + role */
+
+  /* wide tables scroll inside their own box, never the page */
+  .tbl-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  table.tbl { font-size: 12px; }
+  table.tbl th, table.tbl td { padding: 8px 9px; white-space: nowrap; }
+
+  .modal-bg { padding: 0; align-items: flex-end; }
+  .modal { max-width: none; border-radius: var(--radius) var(--radius) 0 0; max-height: 92vh; overflow-y: auto; }
+  .tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+}
+
+@media (max-width: 560px) {
+  /* The calendar becomes a vertical day LIST. A 7-across grid at this width
+     gives ~40px cells, which cannot show hours or be tapped accurately. */
+  .cal-grid { grid-template-columns: 1fr; gap: 4px; }
+  .cal-head { display: none; }
+  .cell.empty { display: none; }          /* leading blanks are meaningless in a list */
+  .cell {
+    min-height: 0;
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 14px;                    /* comfortable touch target (~44px) */
+  }
+  .cell .between { flex: 0 0 auto; gap: 8px; align-items: baseline; }
+  .cell .dom { font-size: 15px; }
+  .cell .hrs { margin-left: auto; text-align: right; }
+  .cell .hol-tag { display: none; }        /* the badge is in the day modal */
+
+  .tiles { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .tile { padding: 12px; }
+  .tile .v { font-size: 20px; }
+}
+
+/* Visible focus for keyboard users. There was previously no focus styling at
+   all, so tabbing through the app gave no indication of position. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* .cell is now a <button> (it must be keyboard-operable). Neutralise the
+   browser's button defaults so it still looks like the card it was. */
+.cell { font: inherit; color: inherit; text-align: left; -webkit-appearance: none; appearance: none; }
+
+/* Document preview: side-by-side on a large screen, a dismissible bottom sheet
+   on a phone. Stacking it below the form (the old behaviour at <=900px) put the
+   document ~2000px away from the hours it is meant to be checked against. */
+.preview-sheet { display: none; }
+@media (max-width: 900px) {
+  .preview-side { display: none; }
+  .preview-sheet {
+    display: block;
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    height: 62vh;
+    z-index: 55;
+    background: var(--surface);
+    border-top: 1px solid var(--line-strong);
+    box-shadow: 0 -8px 24px rgba(15,23,42,.18);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  /* keep the submit card reachable above the sheet */
+  .preview-sheet ~ * { padding-bottom: 62vh; }
+}

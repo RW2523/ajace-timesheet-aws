@@ -17,13 +17,21 @@ export default async function AdminPage() {
     redirect("/dashboard");
   }
 
-  const [{ data: profiles }, { data: edits }, { data: timesheets }, { data: files }, { data: adminEdits }] =
+  // Only the columns the console actually renders. `select *` on
+  // ts_employee_edits/ts_admin_edits drags a 31-entry `days` jsonb per row
+  // across the wire on every visit — and every router.refresh() after a save.
+  // The full `days` is fetched on demand when a submission is opened.
+  // ts_timesheets is NOT fetched at all: it was pulled in full (also carrying
+  // `days`) and then never read by AdminClient.
+  const LIST_COLS = "id,user_id,month,year,fields,validation,submitted,created_at," +
+                    "status,reviewed_at,review_note,final_regular,final_overtime,final_total";
+  const [{ data: profiles }, { data: edits }, { data: files }, { data: adminEdits }] =
     await Promise.all([
       api.from("ts_profiles").select("*").order("full_name"),
-      api.from("ts_employee_edits").select("*").order("created_at", { ascending: false }),
-      api.from("ts_timesheets").select("*").order("created_at", { ascending: false }),
+      api.from("ts_employee_edits").select(LIST_COLS).order("created_at", { ascending: false }),
       api.from("ts_files").select("*").order("created_at", { ascending: false }),
-      api.from("ts_admin_edits").select("*").order("created_at", { ascending: false }),
+      api.from("ts_admin_edits").select("id,employee_user_id,admin_user_id,month,year,note,created_at")
+        .order("created_at", { ascending: false }),
     ]);
 
   return (
@@ -31,7 +39,6 @@ export default async function AdminPage() {
       profile={profile}
       profiles={profiles || []}
       edits={edits || []}
-      timesheets={timesheets || []}
       files={files || []}
       adminEdits={adminEdits || []}
     />

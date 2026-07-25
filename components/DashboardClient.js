@@ -401,6 +401,7 @@ export default function DashboardClient({ profile, submissions = [] }) {
 
         {mode === "review" && (
           <ReviewStep
+            submitError={processError}
             fields={fields} setField={setField} calendar={calendar} month={month} year={year}
             onDayClick={setDayIdx} validation={validation} totals={totals}
             q={q} setQ={setQ} holidays={holidays} holidayWork={holidayWork} setHolidayWork={setHolidayWork}
@@ -504,6 +505,7 @@ function ReviewStep({
   fields, setField, calendar, month, year, onDayClick, validation, totals,
   q, setQ, holidays, holidayWork, setHolidayWork, aiMeta, saving, submit,
   showPreview, previewPages, previewDoc, previewLoading, fileName, togglePreview, resetForNew,
+  submitError,
 }) {
   const left = (
     <div className="stack">
@@ -608,7 +610,9 @@ function ReviewStep({
       {/* submit */}
       <div className="card card-pad between">
         <div className="muted" style={{ fontSize: 13 }}>
-          {validation.ok ? "Everything checks out." : "Resolve the errors above to enable submit."}
+          {submitError
+            ? <span style={{ color: "var(--red)" }}><b>Couldn’t submit:</b> {submitError}</span>
+            : validation.ok ? "Everything checks out." : "Resolve the errors above to enable submit."}
         </div>
         <div className="row">
           <button className="btn btn-ghost" onClick={resetForNew}>Start over</button>
@@ -621,11 +625,24 @@ function ReviewStep({
   );
 
   if (showPreview) {
+    // On a phone .split collapses to one column, which used to push the source
+    // document ~2000px BELOW the form — so "check the AI against your document",
+    // the loop this product exists for, was impossible on mobile. The preview
+    // is a dismissible sheet there instead, so it overlays the day you're on.
     return (
-      <div className="split">
-        {left}
-        <PreviewPane pages={previewPages} doc={previewDoc} loading={previewLoading} fileName={fileName} onClose={togglePreview} />
-      </div>
+      <>
+        <div className="split">
+          {left}
+          <div className="preview-side">
+            <PreviewPane pages={previewPages} doc={previewDoc} loading={previewLoading}
+                         fileName={fileName} onClose={togglePreview} />
+          </div>
+        </div>
+        <div className="preview-sheet" role="dialog" aria-label="Your uploaded document">
+          <PreviewPane pages={previewPages} doc={previewDoc} loading={previewLoading}
+                       fileName={fileName} onClose={togglePreview} />
+        </div>
+      </>
     );
   }
   return left;

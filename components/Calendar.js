@@ -9,14 +9,14 @@ export default function Calendar({ calendar, month, year, onDayClick }) {
 
   return (
     <div className="cal">
-      <div className="cal-grid" style={{ marginBottom: 6 }}>
+      <div className="cal-grid" style={{ marginBottom: 6 }} aria-hidden="true">
         {WD.map((w) => (
           <div key={w} className="cal-head">{w}</div>
         ))}
       </div>
       <div className="cal-grid">
         {Array.from({ length: lead }).map((_, i) => (
-          <div key={"b" + i} className="cell empty" />
+          <div key={"b" + i} className="cell empty" aria-hidden="true" />
         ))}
         {calendar.map((c, idx) => {
           const cls = ["cell"];
@@ -24,9 +24,26 @@ export default function Calendar({ calendar, month, year, onDayClick }) {
           if (c.isHoliday) cls.push("holiday");
           if (!c.isWeekend && !c.isHoliday && !c.filled) cls.push("missing");
           if (c.flagged) cls.push("flagged");
+
+          // Spoken summary, so a day is comprehensible without seeing the
+          // colour coding — and so the hours are announced, not just the date.
+          const hours = c.regular == null && c.overtime == null
+            ? "no hours entered"
+            : `${c.regular || 0} regular${c.overtime ? `, ${c.overtime} overtime` : ""}`;
+          const label = `${c.weekday} ${c.day}${c.isHoliday ? ` (${c.holidayName})` : ""} — ${hours}. Edit this day.`;
+
           return (
-            <div key={c.date} className={cls.join(" ")} onClick={() => onDayClick(idx)} title="Click to edit">
-              {c.flagged && <span className="dot-flag" />}
+            // A real <button>: this was a plain <div onClick>, so there was no
+            // way to reach or activate a day from the keyboard at all.
+            <button
+              key={c.date}
+              type="button"
+              className={cls.join(" ")}
+              onClick={() => onDayClick(idx)}
+              aria-label={label}
+              title="Edit this day"
+            >
+              {c.flagged && <span className="dot-flag" aria-hidden="true" />}
               <div className="between" style={{ alignItems: "baseline" }}>
                 <span className="dom">{c.day}</span>
                 <span className="wd">{c.weekday}</span>
@@ -39,7 +56,7 @@ export default function Calendar({ calendar, month, year, onDayClick }) {
                   <span className="muted" style={{ fontWeight: 400, fontSize: 12 }}>—</span>
                 )}
               </div>
-            </div>
+            </button>
           );
         })}
       </div>

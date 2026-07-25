@@ -8,7 +8,7 @@ import { createClient } from "@/lib/api/client";
 import { periodLabel } from "@/lib/month";
 import { rollup } from "@/lib/engine";
 
-export default function AdminClient({ profile, profiles, edits, timesheets, files, adminEdits }) {
+export default function AdminClient({ profile, profiles, edits, files, adminEdits }) {
   const api = createClient();
   const router = useRouter();
   const pmap = useMemo(() => Object.fromEntries(profiles.map((p) => [p.id, p])), [profiles]);
@@ -281,7 +281,21 @@ export default function AdminClient({ profile, profiles, edits, timesheets, file
 }
 
 function SubmissionDetail({ edit, profile, adminProfile, sourceFile, api, onClose, onSaved }) {
+  // `days` is the heavy part of a submission (one entry per calendar day), so
+  // the list query no longer carries it. Fetch it for just this submission.
   const [days, setDays] = useState(edit.days || []);
+  const [loadingDays, setLoadingDays] = useState(!edit.days);
+  useEffect(() => {
+    if (edit.days) return;
+    let alive = true;
+    api.from("ts_employee_edits").select("days,questionnaire").eq("id", edit.id).single()
+      .then(({ data }) => {
+        if (!alive) return;
+        setDays(data?.days || []);
+        setLoadingDays(false);
+      });
+    return () => { alive = false; };
+  }, [edit.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const [dayIdx, setDayIdx] = useState(null);
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
