@@ -1,6 +1,8 @@
 import { currentUser } from "@/lib/aws/auth";
 import { getObjectBytes } from "@/lib/aws/storage";
 import { serveHeadersFor } from "@/lib/aws/filetypes";
+import { audit } from "@/lib/aws/audit";
+import { clientIp } from "@/lib/aws/ratelimit";
 
 export const runtime = "nodejs";
 
@@ -18,6 +20,12 @@ export async function GET(request) {
   const owner = path.split("/")[0];
   if (owner !== user.id && user.role !== "admin")
     return new Response("forbidden", { status: 403 });
+
+  // Record only cross-user access: an admin opening an employee's document.
+  if (owner !== user.id) {
+    await audit({ actor: user, action: "file.read", subjectId: owner,
+                  detail: { path }, ip: clientIp(request) });
+  }
 
   try {
     const { bytes } = await getObjectBytes(path);

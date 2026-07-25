@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { currentUser } from "@/lib/aws/auth";
 import { queryOne } from "@/lib/aws/db";
+import { audit } from "@/lib/aws/audit";
+import { clientIp } from "@/lib/aws/ratelimit";
 
 export const runtime = "nodejs";
 
@@ -24,7 +26,8 @@ export async function POST(request) {
   }
 
   // A superseded submission is history — reviewing it would be meaningless.
-  const target = await queryOne(`select id, status from public.ts_employee_edits where id=$1`, [editId]);
+  const target = await queryOne(`select id, status, user_id from public.ts_employee_edits where id=$1`, [editId]);
+  const owner = target;
   if (!target) return NextResponse.json({ error: "submission not found" }, { status: 404 });
   if (target.status === "superseded") {
     return NextResponse.json(
@@ -55,5 +58,8 @@ export async function POST(request) {
   );
 
   console.info(`[review] ${user.email} set ${editId} -> ${row.status}${hasFinals ? " (totals corrected)" : ""}`);
+  await audit({ actor: user, action: "review", subjectId: owner?.user_id ?? null,
+                detail: { editId, status: row.status, corrected: !!hasFinals, note: note ?? null },
+                ip: clientIp(request) });
   return NextResponse.json({ ok: true, submission: row });
 }

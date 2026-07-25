@@ -23,9 +23,12 @@ export async function POST(request) {
 
   // Consuming the token in the UPDATE (rather than select-then-update) makes it
   // single-use even if two requests race.
+  // Bumping session_version is what makes a reset actually lock an attacker
+  // out: without it their existing 7-day cookie would keep working.
   const updated = await queryOne(
     `update public.auth_users
-        set password_hash=$1, reset_token=null, reset_expires=null
+        set password_hash=$1, reset_token=null, reset_expires=null,
+            session_version = session_version + 1
       where reset_token=$2 and reset_expires > now()
       returning id, email`,
     [await hashPassword(password), token]

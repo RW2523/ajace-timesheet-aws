@@ -18,7 +18,7 @@ ROOT="$(cd "$HERE/.." && pwd)"               # repo root
 APPDIR="$ROOT"
 ENVF="$ROOT/.env.production"
 
-echo "==> [1/7] swap (best-effort; a 2 GB box builds tight)"
+echo "==> [1/8] swap (best-effort; a 2 GB box builds tight)"
 # NOTE: swapon fails with "Invalid argument" on some ARM AWS kernels. That must
 # never abort the install, and we must not leave a dead 2 GB file behind on a
 # volume that has to fit node_modules + two builds.
@@ -40,7 +40,7 @@ else
   SWAP_OK=1; echo "    swap already active"
 fi
 
-echo "==> [2/7] system packages (node, pm2, caddy, psql, aws cli)"
+echo "==> [2/8] system packages (node, pm2, caddy, psql, aws cli)"
 if ! command -v node >/dev/null 2>&1; then
   curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
   sudo apt-get install -y nodejs
@@ -67,7 +67,7 @@ if ! command -v caddy >/dev/null 2>&1; then
   sudo apt-get update -y && sudo apt-get install -y caddy
 fi
 
-echo "==> [3/7] environment"
+echo "==> [3/8] environment"
 if [ ! -f "$ENVF" ]; then
   cp "$HERE/env.production.example" "$ENVF"
   echo "    created app/.env.production from the template — EDIT IT then re-run."
@@ -98,11 +98,11 @@ if [ -z "${OPENROUTER_API_KEY:-}" ] || [ "${OPENROUTER_API_KEY}" = "sk-or-REPLAC
   echo "    ⚠ OPENROUTER_API_KEY not set — the app runs, but Direct++ extraction won't work."
 fi
 
-echo "==> [4/7] database schema (RDS)"
+echo "==> [4/8] database schema (RDS)"
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$HERE/db/schema.sql"
 echo "    schema applied"
 
-echo "==> [5/7] build the app"
+echo "==> [5/8] build the app"
 FREE_MB=$(df -Pm "$APPDIR" | awk 'NR==2{print $4}')
 if [ "$FREE_MB" -lt 4000 ]; then
   echo "    ✗ only ${FREE_MB}MB free — a Next build needs ~4GB of headroom."
@@ -134,20 +134,31 @@ else
 fi
 cd "$ROOT"
 
-echo "==> [6/7] start under pm2 (+ boot on reboot)"
+echo "==> [6/8] start under pm2 (+ boot on reboot)"
 pm2 startOrReload "$HERE/ecosystem.config.cjs" --update-env
 pm2 save
 sudo env PATH="$PATH" pm2 startup systemd -u "$USER" --hp "$HOME" >/dev/null 2>&1 || true
 
-echo "==> [7/7] reverse proxy (Caddy, port 80)"
+echo "==> [7/8] scheduled jobs (backup + health watchdog)"
+# These were documented but nothing ever installed them, so there were no
+# backups and nothing would have told you the app was down.
+CRON_TMP=$(mktemp)
+crontab -l 2>/dev/null | grep -vE "ajace-timesheet-aws/deploy/scripts/(backup|monitor)\.sh" > "$CRON_TMP" || true
+echo "17 3 * * * $HERE/scripts/backup.sh >> /var/log/ts-backup.log 2>&1" >> "$CRON_TMP"
+echo "*/5 * * * * $HERE/scripts/monitor.sh >/dev/null 2>&1" >> "$CRON_TMP"
+crontab "$CRON_TMP" && rm -f "$CRON_TMP"
+sudo touch /var/log/ts-backup.log && sudo chown "$USER" /var/log/ts-backup.log 2>/dev/null || true
+echo "    nightly backup 03:17 UTC · health check every 5 min"
+
+echo "==> [8/8] reverse proxy (Caddy, port 80)"
 sudo cp "$HERE/Caddyfile" /etc/caddy/Caddyfile
 sudo systemctl reload caddy 2>/dev/null || sudo systemctl restart caddy
 
 # health check rather than an optimistic "it's live"
 sleep 3
-CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:3009/login || echo 000)
+CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 http://127.0.0.1:3009/api/health || echo 000)
 echo
-if [ "$CODE" = "200" ] || [ "$CODE" = "307" ] || [ "$CODE" = "302" ]; then
+if [ "$CODE" = "200" ]; then
   echo "✅ App is LIVE at:  http://${IP:-<this-box-ip>}"
 else
   echo "⚠ App did not answer on :3009 (HTTP $CODE). Check:  pm2 logs ajace-timesheet --lines 40 --nostream"

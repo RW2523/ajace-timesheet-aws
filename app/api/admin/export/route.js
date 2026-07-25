@@ -1,5 +1,7 @@
 import { currentUser } from "@/lib/aws/auth";
 import { query } from "@/lib/aws/db";
+import { audit } from "@/lib/aws/audit";
+import { clientIp } from "@/lib/aws/ratelimit";
 
 export const runtime = "nodejs";
 
@@ -66,6 +68,9 @@ export async function GET(request) {
 
   const name = `timesheets-${year}-${String(month).padStart(2, "0")}${approvedOnly ? "-approved" : "-all"}.csv`;
   console.info(`[export] ${user.email} exported ${rows.length} row(s) for ${year}-${month}`);
+  await audit({ actor: user, action: "export",
+                detail: { year, month, rows: rows.length, approvedOnly, totalHours },
+                ip: clientIp(request) });
   return new Response("﻿" + csv, {   // BOM so Excel reads UTF-8 correctly
     headers: {
       "Content-Type": "text/csv; charset=utf-8",

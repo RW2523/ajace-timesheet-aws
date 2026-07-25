@@ -28,7 +28,9 @@ export async function POST(request) {
 
   // role comes from ts_profiles (source of truth for admin), falling back to auth_users
   const row = await queryOne(
-    `select u.id, u.email, u.password_hash, coalesce(p.role, u.role, 'employee') as role
+    `select u.id, u.email, u.password_hash, u.session_version,
+            coalesce(p.role, u.role, 'employee') as role,
+            coalesce(p.active, true) as active
        from public.auth_users u
        left join public.ts_profiles p on p.id = u.id
       where lower(u.email) = lower($1)`,
@@ -40,8 +42,12 @@ export async function POST(request) {
     return NextResponse.json({ error: "invalid email or password" }, { status: 400 });
   }
 
+  if (row.active === false) {
+    console.warn(`[auth] login refused for deactivated account ${account}`);
+    return NextResponse.json({ error: "This account has been deactivated." }, { status: 403 });
+  }
   rateLimitReset(`login:acct:${account}`);
-  const user = { id: row.id, email: row.email, role: row.role };
+  const user = { id: row.id, email: row.email, role: row.role, session_version: row.session_version };
   await setSessionCookie(await signSession(user));
   return NextResponse.json({ user });
 }

@@ -182,3 +182,60 @@ drop trigger if exists ts_employee_edits_supersede on public.ts_employee_edits;
 create trigger ts_employee_edits_supersede
   after insert on public.ts_employee_edits
   for each row execute function public.ts_supersede_prior_submissions();
+
+-- ---------- Tier 3: operations, revocation, retention ------------------------
+
+-- Session revocation. The session is a stateless 7-day JWT, so changing a
+-- password did NOT log an attacker out and a departing employee kept access
+-- until their token expired. Every token carries the version it was minted with;
+-- bumping this invalidates every existing session for that user immediately.
+alter table public.auth_users
+  add column if not exists session_version int not null default 1;
+
+-- Deactivation instead of deletion. Removing a login used to cascade away the
+-- person's entire payroll history (see the FK change below), and a wage-and-hour
+-- audit expects those records to survive an employee leaving.
+alter table public.ts_profiles
+  add column if not exists active boolean not null default true;
+
+-- Payroll history must not be destroyed by deleting a user. Switch the payroll
+-- tables from ON DELETE CASCADE to RESTRICT so the delete fails loudly and the
+-- operator deactivates instead. (ts_profiles stays CASCADE: it is the person
+-- record itself, not their submitted hours.)
+do $$
+begin
+  alter table public.ts_timesheets      drop constraint if exists ts_timesheets_user_id_fkey;
+  alter table public.ts_timesheets      add  constraint ts_timesheets_user_id_fkey
+    foreign key (user_id) references public.auth_users(id) on delete restrict;
+
+  alter table public.ts_files           drop constraint if exists ts_files_user_id_fkey;
+  alter table public.ts_files           add  constraint ts_files_user_id_fkey
+    foreign key (user_id) references public.auth_users(id) on delete restrict;
+
+  alter table public.ts_employee_edits  drop constraint if exists ts_employee_edits_user_id_fkey;
+  alter table public.ts_employee_edits  add  constraint ts_employee_edits_user_id_fkey
+    foreign key (user_id) references public.auth_users(id) on delete restrict;
+
+  alter table public.ts_admin_edits     drop constraint if exists ts_admin_edits_employee_user_id_fkey;
+  alter table public.ts_admin_edits     add  constraint ts_admin_edits_employee_user_id_fkey
+    foreign key (employee_user_id) references public.auth_users(id) on delete restrict;
+
+  alter table public.ts_admin_edits     drop constraint if exists ts_admin_edits_admin_user_id_fkey;
+  alter table public.ts_admin_edits     add  constraint ts_admin_edits_admin_user_id_fkey
+    foreign key (admin_user_id) references public.auth_users(id) on delete restrict;
+end $$;
+
+-- Who looked at, exported, or changed someone else's data. Nothing recorded
+-- admin access before, so there was no way to answer "who saw this?".
+create table if not exists public.ts_audit_log (
+  id          bigserial primary key,
+  at          timestamptz not null default now(),
+  actor_id    uuid,
+  actor_email text,
+  action      text not null,          -- e.g. 'export', 'review', 'file.read'
+  subject_id  uuid,                   -- the employee whose data was touched
+  detail      jsonb default '{}'::jsonb,
+  ip          text
+);
+create index if not exists ts_audit_log_at_idx on public.ts_audit_log(at desc);
+create index if not exists ts_audit_log_subject_idx on public.ts_audit_log(subject_id, at desc);
