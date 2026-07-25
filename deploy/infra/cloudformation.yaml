@@ -1,0 +1,216 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  AJACE Timesheet (AWS-only) — provisions the whole AWS side: S3 bucket,
+  RDS PostgreSQL, EC2 app host, an IAM role granting the box S3 + SES, and
+  security groups. After this stack is CREATE_COMPLETE, SSH to the app host
+  and run deploy/scripts/install.sh to bring the app up.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to deploy into (your default VPC is fine).
+  AppSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: A PUBLIC subnet (auto-assign public IPv4 ON) for the app host.
+  DbSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Two subnets in different AZs for the RDS subnet group.
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Existing EC2 key pair for SSH.
+  SSHLocation:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR allowed to SSH. Use YOUR_IP/32.
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: RDS master password (used in DATABASE_URL).
+  BucketName:
+    Type: String
+    Default: ajace-ts-files
+    Description: Globally-unique S3 bucket name for timesheet files.
+  BudgetAlertEmail:
+    Type: String
+    Description: Email to alert when the monthly cost budget crosses thresholds.
+  MonthlyBudgetUSD:
+    Type: Number
+    Default: 15
+    Description: Monthly cost budget in USD (alerting only — not a hard cap).
+  InstanceType:
+    Type: String
+    Default: t4g.small
+  DBInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+  VolumeSizeGB:
+    Type: Number
+    Default: 50
+    MinValue: 30
+    Description: >
+      Root EBS size. 50 GB gives node_modules + two Next builds room to spare;
+      a build that runs out of disk fails with ENOSPC. ~$4/mo at 50 GB gp3.
+  DBEngineVersion:
+    Type: String
+    Default: '16'
+    Description: >
+      Major version only — RDS picks the latest supported minor, so this can't
+      break when AWS retires a specific minor. Pinning the MAJOR still stops a
+      future default (e.g. 18) from changing under you.
+  UbuntuAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id
+
+Resources:
+  FilesBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Ref BucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      # No CorsConfiguration on purpose: the browser NEVER talks to S3 directly.
+      # Uploads/downloads are proxied by the app (/api/storage/upload and
+      # /api/storage/get) using the instance role, so there is no cross-origin
+      # request to allow — and no s3:PutBucketCORS permission needed anywhere.
+
+  AppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: timesheet-s3-ses
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
+                Resource: !Sub 'arn:aws:s3:::${BucketName}/*'
+              - Effect: Allow
+                Action: [s3:ListBucket]
+                Resource: !Sub 'arn:aws:s3:::${BucketName}'
+              - Effect: Allow
+                Action: [ses:SendEmail, ses:SendRawEmail]
+                Resource: '*'
+
+  AppInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref AppRole]
+
+  AppSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Timesheet app host (SSH + HTTP/S)
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 22,  ToPort: 22,  CidrIp: !Ref SSHLocation }
+        - { IpProtocol: tcp, FromPort: 80,  ToPort: 80,  CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0 }
+
+  DbSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Timesheet RDS (Postgres from the app host only)
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 5432, ToPort: 5432, SourceSecurityGroupId: !Ref AppSg }
+
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Timesheet RDS subnets
+      SubnetIds: !Ref DbSubnetIds
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    Properties:
+      Engine: postgres
+      EngineVersion: !Ref DBEngineVersion
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: '20'
+      StorageType: gp3
+      DBName: timesheet
+      MasterUsername: tsadmin
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups: [!Ref DbSg]
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      BackupRetentionPeriod: 7
+      MultiAZ: false
+
+  AppHost:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref UbuntuAmi
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref AppInstanceProfile
+      SubnetId: !Ref AppSubnetId
+      SecurityGroupIds: [!Ref AppSg]
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs: { VolumeSize: !Ref VolumeSizeGB, VolumeType: gp3, DeleteOnTermination: true }
+      Tags: [{ Key: Name, Value: ajace-timesheet }]
+      UserData:
+        # Deliberately minimal: just git, so you can clone and run install.sh.
+        # (Do NOT apt-get install awscli here — that package does not exist on
+        # Ubuntu 24.04 and would abort UserData. install.sh fetches AWS CLI v2.)
+        # No `set -e`: a hiccup here must never leave an unusable box.
+        Fn::Base64: |
+          #!/bin/bash
+          apt-get update -y
+          apt-get install -y git
+          echo "Run: git clone https://github.com/RW2523/ajace-timesheet-aws.git && cd ajace-timesheet-aws && bash deploy/scripts/install.sh" > /etc/motd
+
+  # AWS Budgets — the first two budgets are FREE. Alerts by email at thresholds.
+  # NOTE: this ALERTS, it does not hard-stop spend. To actually stay under the
+  # limit, run intermittently (scripts/instance.sh stop) — see README.
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: ajace-timesheet-monthly
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetUSD
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification: { NotificationType: ACTUAL, ComparisonOperator: GREATER_THAN, Threshold: 50,  ThresholdType: PERCENTAGE }
+          Subscribers: [{ SubscriptionType: EMAIL, Address: !Ref BudgetAlertEmail }]
+        - Notification: { NotificationType: ACTUAL, ComparisonOperator: GREATER_THAN, Threshold: 80,  ThresholdType: PERCENTAGE }
+          Subscribers: [{ SubscriptionType: EMAIL, Address: !Ref BudgetAlertEmail }]
+        - Notification: { NotificationType: ACTUAL, ComparisonOperator: GREATER_THAN, Threshold: 100, ThresholdType: PERCENTAGE }
+          Subscribers: [{ SubscriptionType: EMAIL, Address: !Ref BudgetAlertEmail }]
+        - Notification: { NotificationType: FORECASTED, ComparisonOperator: GREATER_THAN, Threshold: 100, ThresholdType: PERCENTAGE }
+          Subscribers: [{ SubscriptionType: EMAIL, Address: !Ref BudgetAlertEmail }]
+
+Outputs:
+  AppPublicIP:
+    Description: Point your DNS A record (timesheet.<domain>) at this.
+    Value: !GetAtt AppHost.PublicIp
+  AppPublicDNS:
+    Value: !GetAtt AppHost.PublicDnsName
+  DBEndpoint:
+    Description: RDS host for DATABASE_URL.
+    Value: !GetAtt Database.Endpoint.Address
+  DatabaseUrlHint:
+    Description: Template for DATABASE_URL — replace <DBPassword> with your DBPassword value.
+    Value: !Sub 'postgresql://tsadmin:REPLACE_DBPASSWORD@${Database.Endpoint.Address}:5432/timesheet'
+  BucketName:
+    Value: !Ref FilesBucket

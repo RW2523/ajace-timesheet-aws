@@ -1,0 +1,10 @@
+node_modules/
+.next/
+.next.prev/
+.env
+.env.local
+.env.production
+*.pem
+deploy/.aws-state*
+.DS_Store
+npm-debug.log*

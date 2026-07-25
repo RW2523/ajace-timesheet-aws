@@ -1,0 +1,18 @@
+# DEFAULT: no domain yet — serve the app over plain HTTP on :80 so you can use
+# the raw EC2 URL (http://<EC2-public-IP>). Pair this with COOKIE_SECURE=false
+# in app/.env.production, or login cookies won't stick over HTTP.
+:80 {
+	encode gzip
+	reverse_proxy 127.0.0.1:3009
+}
+
+# LATER, when you have a domain: comment the block above, uncomment this, put in
+# your hostname + ACME email, point DNS at the box, and set COOKIE_SECURE=true.
+# Caddy then auto-issues a Let's Encrypt certificate.
+# {
+# 	email admin@ajace.com
+# }
+# timesheet.ajace.com {
+# 	encode gzip
+# 	reverse_proxy 127.0.0.1:3009
+# }
