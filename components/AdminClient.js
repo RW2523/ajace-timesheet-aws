@@ -8,7 +8,7 @@ import { createClient } from "@/lib/api/client";
 import { periodLabel } from "@/lib/month";
 import { rollup } from "@/lib/engine";
 
-export default function AdminClient({ profile, profiles, edits, timesheets, files, adminEdits, aiFlow = "premium" }) {
+export default function AdminClient({ profile, profiles, edits, timesheets, files, adminEdits }) {
   const api = createClient();
   const router = useRouter();
   const pmap = useMemo(() => Object.fromEntries(profiles.map((p) => [p.id, p])), [profiles]);
@@ -85,8 +85,6 @@ export default function AdminClient({ profile, profiles, edits, timesheets, file
           <div className="tile tot"><div className="v">{Math.round(totalHours)}</div><div className="l">Total hours</div></div>
           <div className="tile"><div className="v" style={{ color: flagged ? "var(--red)" : "var(--green)" }}>{flagged}</div><div className="l">With errors</div></div>
         </div>
-
-        <FlowPicker api={api} adminId={profile.id} initial={aiFlow} />
 
         <div className="tabs">
           {[["submissions", "Submissions"], ["employees", "Employees"], ["files", "Files"], ["revisions", "Admin revisions"]].map(([k, label]) => (
@@ -472,73 +470,6 @@ function DocPreviewPanel({ api, path, fileName, onClose }) {
           {!loading && !err && !doc && pages.map((src, i) => <img key={i} src={src} alt={`page ${i + 1}`} />)}
         </div>
       </div>
-  );
-}
-
-// Admin control: which AI flow processes employee uploads.
-function FlowPicker({ api, adminId, initial }) {
-  const [flow, setFlow] = useState(initial);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState("");
-
-  async function choose(next) {
-    if (next === flow || saving) return;
-    setSaving(true); setSaved("");
-    // updated_at is refreshed server-side on conflict; there is no updated_by column
-    const { error } = await api.from("ts_app_settings").upsert(
-      { key: "ai_flow", value: next },
-      { onConflict: "key" }
-    );
-    setSaving(false);
-    if (error) { setSaved("Failed to save: " + (error.message || error)); return; }
-    setFlow(next);
-    setSaved("Saved ✓ — new uploads will use the " + next + " flow.");
-  }
-
-  const opts = [
-    { key: "direct_serverless", title: "🚀 Direct (serverless)", desc: "Runs entirely inside the web app — no Python engine, no server. Direct++ (read → arithmetic repair → cross-family verify) in a Vercel function; needs only the OpenRouter key. Excel arrives as extracted text." },
-    { key: "consensus", title: "🎯 Consensus", desc: "Highest accuracy — needs TWO agreeing derivations (a deterministic read + a blind model read) before a number auto-accepts. Clean sheets whose printed total matches exit free; disagreements go to review, never a silent wrong number." },
-    { key: "premium_plus", title: "✨ Premium+", desc: "Best value — Premium's cheap parse-first, PLUS a full-image GPT vision re-read for any scan it under-reads. Recovers faint scans (e.g. Rajani 3h → correct) for pennies." },
-    { key: "direct", title: "⚡ Direct", desc: "Whole file to GPT-5.4-nano with one exhaustive prompt, escalating to 5.4-mini / GPT-5 on hard docs. One request per file." },
-    { key: "premium", title: "⭐ Premium", desc: "Parse-first — GPT-4o-mini + Gemini second opinion on hard files. Cheapest cloud." },
-    { key: "budget", title: "💰 Budget", desc: "Near-zero cost — free local AI first (slower), cloud only as fallback. No Gemini." },
-  ];
-
-  return (
-    <div className="card card-pad" style={{ marginBottom: 20 }}>
-      <div className="between" style={{ flexWrap: "wrap", gap: 10 }}>
-        <div>
-          <h3 className="card-title" style={{ marginBottom: 4 }}>AI processing flow</h3>
-          <div className="muted" style={{ fontSize: 12 }}>
-            Applies to every employee upload processed with AI.
-          </div>
-        </div>
-        <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
-          {opts.map((o) => (
-            <button key={o.key} onClick={() => choose(o.key)} disabled={saving}
-              title={o.desc}
-              className="btn"
-              style={{
-                flexDirection: "column", alignItems: "flex-start", gap: 2,
-                maxWidth: 320, textAlign: "left",
-                border: flow === o.key ? "2px solid var(--brand)" : "1px solid var(--line-strong)",
-                background: flow === o.key ? "var(--brand-soft)" : "var(--surface)",
-                color: "var(--txt)",
-              }}>
-              <span style={{ fontWeight: 700 }}>
-                {o.title} {flow === o.key && <span className="badge green" style={{ marginLeft: 6 }}>active</span>}
-              </span>
-              <span className="muted" style={{ fontSize: 11, fontWeight: 400, whiteSpace: "normal" }}>{o.desc}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-      {saved && (
-        <div className={"alert " + (saved.startsWith("Failed") ? "error" : "ok")} style={{ marginTop: 10 }}>
-          {saved}
-        </div>
-      )}
-    </div>
   );
 }
 

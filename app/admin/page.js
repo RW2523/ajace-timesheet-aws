@@ -17,14 +17,13 @@ export default async function AdminPage() {
     redirect("/dashboard");
   }
 
-  const [{ data: profiles }, { data: edits }, { data: timesheets }, { data: files }, { data: adminEdits }, { data: flowRow }] =
+  const [{ data: profiles }, { data: edits }, { data: timesheets }, { data: files }, { data: adminEdits }] =
     await Promise.all([
       api.from("ts_profiles").select("*").order("full_name"),
       api.from("ts_employee_edits").select("*").order("created_at", { ascending: false }),
       api.from("ts_timesheets").select("*").order("created_at", { ascending: false }),
       api.from("ts_files").select("*").order("created_at", { ascending: false }),
       api.from("ts_admin_edits").select("*").order("created_at", { ascending: false }),
-      api.from("ts_app_settings").select("value").eq("key", "ai_flow").single(),
     ]);
 
   return (
@@ -35,7 +34,6 @@ export default async function AdminPage() {
       timesheets={timesheets || []}
       files={files || []}
       adminEdits={adminEdits || []}
-      aiFlow={["direct","premium_plus","budget","premium","consensus","direct_serverless"].includes(flowRow?.value) ? flowRow.value : "direct"}
     />
   );
 }
