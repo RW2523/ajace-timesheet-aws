@@ -14,7 +14,7 @@ function ResetInner() {
   async function onSubmit(e) {
     e.preventDefault();
     setErr("");
-    if (pw.length < 6) return setErr("Password must be at least 6 characters.");
+    if (pw.length < 10) return setErr("Password must be at least 10 characters.");
     if (pw !== pw2) return setErr("Passwords don’t match.");
     setBusy(true);
     const res = await fetch("/api/auth/reset", {

@@ -419,7 +419,7 @@ function UploadStep({ file, drag, setDrag, fileInput, onPickFile, processing, pr
         onDrop={(e) => { e.preventDefault(); setDrag(false); onPickFile(e.dataTransfer.files?.[0]); }}
       >
         <input ref={fileInput} type="file" hidden
-          accept=".pdf,.png,.jpg,.jpeg,.xlsx,.xls,.csv,.docx,.doc"
+          accept="image/*,.pdf,.png,.jpg,.jpeg,.webp,.gif,.heic,.heif,.xlsx,.xls,.csv,.docx,.doc"
           onChange={(e) => onPickFile(e.target.files?.[0])} />
         <div style={{ fontSize: 30 }}>📄</div>
         <div style={{ fontWeight: 600, marginTop: 6 }}>

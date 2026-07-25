@@ -1,33 +1,84 @@
 import { NextResponse } from "next/server";
 import { query, queryOne } from "@/lib/aws/db";
 import { hashPassword, signSession, setSessionCookie } from "@/lib/aws/auth";
+import { rateLimit, clientIp } from "@/lib/aws/ratelimit";
+import { passwordProblem } from "@/lib/aws/password";
 
 export const runtime = "nodejs";
 
+// Signup is CLOSED by default. Previously any visitor on the internet could
+// create an account on the payroll system. Eligibility is now decided by
+//   SIGNUP_ALLOWED_DOMAINS=ajace.com,contractor.example
+// with one exception: while there are no users at all, the first signup is
+// allowed and becomes the admin, so a fresh deployment can be bootstrapped.
+function allowedDomains() {
+  return (process.env.SIGNUP_ALLOWED_DOMAINS || "")
+    .split(",").map((d) => d.trim().toLowerCase()).filter(Boolean);
+}
+
 export async function POST(request) {
-  const { email, password, meta = {} } = await request.json().catch(() => ({}));
-  if (!email || !password || password.length < 6) {
-    return NextResponse.json({ error: "email and a 6+ character password are required" }, { status: 400 });
+  const ip = clientIp(request);
+  // Account creation is expensive (bcrypt) and abusable; cap it hard.
+  const rl = rateLimit(`signup:ip:${ip}`, { limit: 5, windowMs: 60 * 60 * 1000 });
+  if (!rl.ok) {
+    return NextResponse.json(
+      { error: "Too many sign-up attempts. Try again later." },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } }
+    );
   }
-  const existing = await queryOne(`select id from public.auth_users where lower(email)=lower($1)`, [email]);
+
+  const { email, password, meta = {} } = await request.json().catch(() => ({}));
+  const addr = String(email || "").trim().toLowerCase();
+  if (!addr || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(addr)) {
+    return NextResponse.json({ error: "A valid work email is required." }, { status: 400 });
+  }
+  const pwProblem = passwordProblem(password);
+  if (pwProblem) return NextResponse.json({ error: pwProblem }, { status: 400 });
+
+  // Bootstrap: the very first account may always be created, and becomes admin
+  // so there is no chicken-and-egg problem on a fresh deployment.
+  const first = await queryOne(`select count(*)::int as count from public.auth_users`);
+  const isFirstUser = (first?.count ?? 0) === 0;
+
+  if (!isFirstUser) {
+    const domains = allowedDomains();
+    const domain = addr.split("@")[1];
+    if (!domains.length) {
+      return NextResponse.json(
+        { error: "Sign-up is closed. Ask your administrator to create your account." },
+        { status: 403 }
+      );
+    }
+    if (!domains.includes(domain)) {
+      // Deliberately does not reveal which domains are permitted.
+      return NextResponse.json(
+        { error: "This email address isn't eligible to sign up. Contact your administrator." },
+        { status: 403 }
+      );
+    }
+  }
+
+  const existing = await queryOne(`select id from public.auth_users where lower(email)=lower($1)`, [addr]);
   if (existing) return NextResponse.json({ error: "an account with that email already exists" }, { status: 400 });
 
+  const role = isFirstUser ? "admin" : "employee";
   const hash = await hashPassword(password);
   const u = await queryOne(
-    `insert into public.auth_users (email, password_hash, role) values ($1,$2,'employee')
+    `insert into public.auth_users (email, password_hash, role) values ($1,$2,$3)
      returning id, email, role`,
-    [email, hash]
+    [addr, hash, role]
   );
-  // provision the timesheet profile (mirrors the old ts_handle_new_user trigger)
+  // provision the timesheet profile
   await query(
     `insert into public.ts_profiles
        (id,email,full_name,phone,role,employer,client,job_title,employee_code,country,manager_name,manager_email)
-     values ($1,$2,$3,$4,'employee',$5,$6,$7,$8,coalesce($9,'US'),$10,$11)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,coalesce($10,'US'),$11,$12)
      on conflict (id) do nothing`,
-    [u.id, email, meta.full_name || "", meta.phone || null, meta.employer || null,
+    [u.id, addr, meta.full_name || "", meta.phone || null, role, meta.employer || null,
      meta.client || null, meta.job_title || null, meta.employee_code || null,
      meta.country || "US", meta.manager_name || null, meta.manager_email || null]
   );
+  if (isFirstUser) console.warn(`[auth] bootstrap: first account ${addr} created as ADMIN`);
 
   await setSessionCookie(await signSession(u));
   return NextResponse.json({ user: u });

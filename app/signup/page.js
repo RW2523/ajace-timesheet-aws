@@ -68,7 +68,7 @@ export default function SignupPage() {
             <SectionLabel>Account</SectionLabel>
             <div className="grid-2">
               <Field label="Work email" req><input type="email" required value={f.email} onChange={set("email")} placeholder="you@ajace.com" /></Field>
-              <Field label="Password" req hint="Min 6 characters"><input type="password" required minLength={6} value={f.password} onChange={set("password")} placeholder="••••••••" /></Field>
+              <Field label="Password" req hint="Min 10 characters"><input type="password" required minLength={10} value={f.password} onChange={set("password")} placeholder="••••••••" /></Field>
             </div>
 
             <SectionLabel>Personal details</SectionLabel>
