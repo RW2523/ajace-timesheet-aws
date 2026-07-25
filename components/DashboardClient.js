@@ -67,7 +67,8 @@ export default function DashboardClient({ profile, submissions = [] }) {
   );
   const totals = {
     regular: validation.calReg, overtime: validation.calOt,
-    total: validation.calTotal, weekendHrs: validation.weekendHrs,
+    other: validation.calOther, total: validation.calTotal,
+    weekendHrs: validation.weekendHrs,
   };
   const setField = (k) => (e) => setFields({ ...fields, [k]: e.target.value });
 
@@ -176,13 +177,11 @@ export default function DashboardClient({ profile, submissions = [] }) {
           project: (emp.projects && emp.projects[0]) || prev.project,
         }));
       }
-      const t = data.totals || rollup(cal);
-      setQ((prev) => ({
-        ...prev,
-        regularHours: t.regular,
-        overtimeHours: t.overtime,
-        workedWeekends: cal.some((c) => c.isWeekend && c.total > 0) ? "yes" : "no",
-      }));
+      // DELIBERATELY NOT pre-filled from the extraction. These answers are the
+      // only independent check on what the AI read; seeding them with the AI's
+      // own totals made every misread agree with itself and show "ready to
+      // submit". The employee states their hours; validate.js compares.
+      setQ((prev) => ({ ...prev, regularHours: "", overtimeHours: "", workedWeekends: "" }));
       // default holiday-worked from the calendar
       const hw = {};
       for (const date of Object.keys(holidays)) {
@@ -195,6 +194,10 @@ export default function DashboardClient({ profile, submissions = [] }) {
         count: data.employee_count, fileName: data.file_name,
         flow: data.flow || null, agentTrace: data.agent_trace || null,
         reviewStatus: data.review_status || null,
+        // The extractor computes these and they were being thrown away — they
+        // are the only signals that flag a bad read to the person who can fix it.
+        issues: emp?.issues || [],
+        notes: emp?.notes || [],
       });
 
       // 3) persist the AI baseline
@@ -509,6 +512,33 @@ function ReviewStep({
           ✨ AI populated this from <b>{aiMeta.fileName}</b>
           {aiMeta.confidence != null && <> · confidence {Math.round(aiMeta.confidence * 100)}%</>}
           {aiMeta.llm_used ? " · LLM used" : ""}. Review and correct anything below.
+        </div>
+      )}
+
+      {/* The extraction's OWN doubts. These were computed and then discarded —
+          e.g. "verification DISAGREED: primary 168h vs re-read 140h", or the
+          document's printed total not matching the days. The employee is the
+          only person who can resolve them, so they belong here. */}
+      {aiMeta && (aiMeta.issues?.length > 0 || aiMeta.reviewStatus === "blocked" ||
+                  aiMeta.reviewStatus === "needs_review") && (
+        <div className="alert" style={{ display: "block", borderColor: "var(--amber)" }}>
+          <b>⚠ The AI wasn’t fully sure about this document — please check these:</b>
+          <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+            {(aiMeta.issues || []).map((it, i) => (
+              <li key={i}>{it.message || it.code}</li>
+            ))}
+            {!aiMeta.issues?.length && <li>Its own verification flagged this read for review.</li>}
+          </ul>
+          {aiMeta.notes?.length > 0 && (
+            <details style={{ marginTop: 8 }}>
+              <summary className="muted" style={{ fontSize: 12, cursor: "pointer" }}>
+                What the AI did ({aiMeta.notes.length} step{aiMeta.notes.length > 1 ? "s" : ""})
+              </summary>
+              <ul className="muted" style={{ fontSize: 12, margin: "6px 0 0", paddingLeft: 18 }}>
+                {aiMeta.notes.map((n, i) => <li key={i}>{n}</li>)}
+              </ul>
+            </details>
+          )}
         </div>
       )}
 

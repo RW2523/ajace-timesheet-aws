@@ -28,3 +28,4 @@ echo "==> running tests"
 export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$PORT/timesheet" PGSSL=disable
 node "$ROOT/test/data-layer.test.mjs"
 node "$ROOT/test/review-flow.test.mjs"
+node "$ROOT/test/derived-totals.test.mjs"
