@@ -23,5 +23,13 @@ export default async function DashboardPage() {
       role: "employee", employer: "", client: "", employee_code: "",
     };
   }
-  return <DashboardClient profile={profile} />;
+  // The employee's own submissions. data.js forces user_id = me on non-admin
+  // selects, so this is already scoped. Without it the dashboard is write-only:
+  // after submitting you'd see a blank upload screen with no proof it worked.
+  const { data: mySubmissions } = await api
+    .from("ts_employee_edits")
+    .select("id,month,year,status,created_at,fields,review_note,final_total")
+    .order("created_at", { ascending: false });
+
+  return <DashboardClient profile={profile} submissions={mySubmissions || []} />;
 }

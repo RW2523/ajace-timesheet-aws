@@ -25,5 +25,6 @@ PGPASSWORD=postgres psql -h 127.0.0.1 -p "$PORT" -U postgres -d timesheet \
   -v ON_ERROR_STOP=1 -q -f "$ROOT/deploy/db/schema.sql"
 
 echo "==> running tests"
-DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$PORT/timesheet" PGSSL=disable \
-  node "$ROOT/test/data-layer.test.mjs"
+export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$PORT/timesheet" PGSSL=disable
+node "$ROOT/test/data-layer.test.mjs"
+node "$ROOT/test/review-flow.test.mjs"

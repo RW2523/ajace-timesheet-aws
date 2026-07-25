@@ -42,8 +42,36 @@ export default function AdminClient({ profile, profiles, edits, timesheets, file
   const pFiles = files.filter(inPeriod);
   const pAdminEdits = adminEdits.filter(inPeriod);
 
-  const totalHours = pEdits.reduce((a, e) => a + (e.fields?.totals?.total || 0), 0);
-  const flagged = pEdits.filter((e) => (e.validation?.errors?.length || 0) > 0).length;
+  // Superseded rows are history: a resubmission replaced them. Excluding them is
+  // what stops one employee's correction from double-counting the month.
+  const current = pEdits.filter((e) => e.status !== "superseded");
+
+  // THE numbers of record: an admin correction (final_*) wins over what the
+  // employee submitted. This is what the export pays and what the tiles show.
+  const payroll = (e) => ({
+    regular: e.final_regular ?? e.fields?.totals?.regular ?? 0,
+    overtime: e.final_overtime ?? e.fields?.totals?.overtime ?? 0,
+    total: e.final_total ?? e.fields?.totals?.total ?? 0,
+    corrected: e.final_total != null,
+  });
+
+  const totalHours = current.reduce((a, e) => a + Number(payroll(e).total || 0), 0);
+  const flagged = current.filter((e) => (e.validation?.errors?.length || 0) > 0).length;
+  const awaiting = current.filter((e) => (e.status || "submitted") === "submitted").length;
+
+  // Who hasn't submitted for this period — the actual month-end chase list.
+  const notSubmitted = useMemo(() => {
+    if (period === "all") return [];
+    const done = new Set(current.map((e) => e.user_id));
+    return profiles.filter((p) => p.role !== "admin" && !done.has(p.id));
+  }, [profiles, current, period]);
+
+  const STATUS_BADGE = {
+    submitted: ["amber", "awaiting review"],
+    approved: ["green", "approved"],
+    rejected: ["red", "rejected"],
+    superseded: ["gray", "superseded"],
+  };
 
   // Triage bucket for a submission: prefer the engine's review_status; fall back
   // to the stored validation (older submissions predate review_status).
@@ -80,11 +108,47 @@ export default function AdminClient({ profile, profiles, edits, timesheets, file
         </div>
 
         <div className="tiles" style={{ margin: "14px 0 20px" }}>
-          <div className="tile"><div className="v">{new Set(pEdits.map((e) => e.user_id)).size}</div><div className="l">Employees this month</div></div>
-          <div className="tile"><div className="v">{pEdits.length}</div><div className="l">Submissions</div></div>
+          <div className="tile"><div className="v">{new Set(current.map((e) => e.user_id)).size}</div><div className="l">Employees this month</div></div>
+          <div className="tile"><div className="v" style={{ color: awaiting ? "var(--amber)" : "var(--green)" }}>{awaiting}</div><div className="l">Awaiting review</div></div>
           <div className="tile tot"><div className="v">{Math.round(totalHours)}</div><div className="l">Total hours</div></div>
-          <div className="tile"><div className="v" style={{ color: flagged ? "var(--red)" : "var(--green)" }}>{flagged}</div><div className="l">With errors</div></div>
+          <div className="tile"><div className="v" style={{ color: notSubmitted.length ? "var(--red)" : "var(--green)" }}>{notSubmitted.length}</div><div className="l">Not submitted</div></div>
         </div>
+
+        {/* Month-end chase list: who still owes you a timesheet. */}
+        {period !== "all" && notSubmitted.length > 0 && (
+          <div className="card card-pad" style={{ marginBottom: 20 }}>
+            <div className="between" style={{ flexWrap: "wrap", gap: 8 }}>
+              <h3 className="card-title" style={{ marginBottom: 0 }}>
+                Not submitted yet ({notSubmitted.length})
+              </h3>
+              <span className="muted" style={{ fontSize: 12 }}>
+                Employees with no timesheet for this period.
+              </span>
+            </div>
+            <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+              {notSubmitted.map((p) => (
+                <a key={p.id} href={`mailto:${p.email}?subject=${encodeURIComponent("Timesheet reminder")}`}
+                   className="badge gray" style={{ textDecoration: "none" }}
+                   title={`Email ${p.email}`}>
+                  {p.full_name || p.email}
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {period !== "all" && (
+          <div className="row" style={{ gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+            <a className="btn btn-primary btn-sm"
+               href={`/api/admin/export?year=${period.split("-")[0]}&month=${period.split("-")[1]}`}>
+              ⬇ Export approved for payroll (CSV)
+            </a>
+            <a className="btn btn-ghost btn-sm"
+               href={`/api/admin/export?year=${period.split("-")[0]}&month=${period.split("-")[1]}&all=1`}>
+              Export all submissions
+            </a>
+          </div>
+        )}
 
         <div className="tabs">
           {[["submissions", "Submissions"], ["employees", "Employees"], ["files", "Files"], ["revisions", "Admin revisions"]].map(([k, label]) => (
@@ -112,11 +176,12 @@ export default function AdminClient({ profile, profiles, edits, timesheets, file
               </button>
             ))}
           </div>
-          <Table headers={["Employee", "Client", "Period", "Regular", "OT", "Total", "Triage", "Status", "Submitted", ""]}>
+          <Table headers={["Employee", "Client", "Period", "Regular", "OT", "Total", "Review", "Checks", "Submitted", ""]}>
             {shownEdits.length === 0 && <Empty cols={10} text="No submissions in this bucket." />}
             {shownEdits.map((e) => {
               const p = pmap[e.user_id] || {};
-              const t = e.fields?.totals || {};
+              const t = payroll(e);
+              const sb = STATUS_BADGE[e.status || "submitted"] || STATUS_BADGE.submitted;
               const errs = e.validation?.errors?.length || 0;
               const rv = reviewOf(e);
               const rvBadge = rv === "auto_accepted" ? ["green", "clean"]
@@ -126,10 +191,16 @@ export default function AdminClient({ profile, profiles, edits, timesheets, file
                   <td><b>{p.full_name || e.fields?.employee_name || "—"}</b><br /><span className="muted" style={{ fontSize: 12 }}>{p.email}</span></td>
                   <td>{e.fields?.client || p.client || "—"}</td>
                   <td>{periodLabel(e.month, e.year)}</td>
-                  <td>{t.regular ?? "—"}</td>
-                  <td>{t.overtime ?? "—"}</td>
-                  <td><b>{t.total ?? "—"}</b></td>
-                  <td><span className={"badge " + rvBadge[0]}>{rvBadge[1]}</span></td>
+                  <td>{t.regular}</td>
+                  <td>{t.overtime}</td>
+                  <td>
+                    <b>{t.total}</b>
+                    {t.corrected && <span className="badge purple" style={{ marginLeft: 6 }} title="Admin-corrected — this is the figure payroll uses">corrected</span>}
+                  </td>
+                  <td>
+                    <span className={"badge " + sb[0]}>{sb[1]}</span>
+                    {" "}<span className={"badge " + rvBadge[0]} title="AI confidence">{rvBadge[1]}</span>
+                  </td>
                   <td>{errs > 0 ? <span className="badge red">{errs} error{errs > 1 ? "s" : ""}</span> : <span className="badge green">clean</span>}</td>
                   <td className="muted" style={{ fontSize: 12 }}>{fmt(e.created_at)}</td>
                   <td><button className="btn btn-ghost btn-sm" onClick={() => setDetail(e)}>Review</button></td>
@@ -242,11 +313,41 @@ function SubmissionDetail({ edit, profile, adminProfile, sourceFile, api, onClos
       fields: { ...(edit.fields || {}), totals: r }, days,
       questionnaire: q, validation: edit.validation || {}, note: note || null,
     });
+    if (error) { setSaving(false); setSaveErr(error.message || "couldn't save this revision"); return; }
+
+    // Writing the revision is not enough: without this the submissions table and
+    // the payroll export would keep reporting the employee's uncorrected hours.
+    // Promote the corrected totals to the numbers of record on the submission.
+    const res = await fetch("/api/admin/review", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ editId: edit.id, note: note || null,
+                             finals: { regular: r.regular, overtime: r.overtime, total: r.total } }),
+    });
     setSaving(false);
-    if (error) { setSaveErr(error.message || "couldn't save this revision"); return; }
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      setSaveErr(j.error || "revision saved, but the payroll total wasn't updated");
+      return;
+    }
     setSaveErr("");
     setSaved(true);
     setTimeout(() => (onSaved ? onSaved() : onClose()), 900);
+  }
+
+  // Approve / reject / reopen — the review decision itself.
+  async function setStatus(status) {
+    setSaving(true); setSaveErr("");
+    const res = await fetch("/api/admin/review", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ editId: edit.id, status, note: note || null }),
+    });
+    setSaving(false);
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      setSaveErr(j.error || "couldn't update the review status");
+      return;
+    }
+    onSaved ? onSaved() : onClose();
   }
 
   return (
@@ -315,8 +416,17 @@ function SubmissionDetail({ edit, profile, adminProfile, sourceFile, api, onClos
             <span className="muted" style={{ fontSize: 12 }}>Saved as a separate admin revision; the employee’s submission is preserved.</span>
             <div className="row">
               <button className="btn btn-ghost" onClick={onClose}>Close</button>
+              <button className="btn btn-ghost" disabled={saving} onClick={() => setStatus("rejected")}
+                      style={{ color: "var(--red)" }} title="Send back to the employee to resubmit">
+                Reject
+              </button>
               <button className="btn btn-primary" disabled={saving} onClick={saveAdminEdit}>
                 {saved ? "Saved ✓" : saving ? "Saving…" : "Save admin revision"}
+              </button>
+              <button className="btn btn-primary" disabled={saving} onClick={() => setStatus("approved")}
+                      style={{ background: "var(--green)", borderColor: "var(--green)" }}
+                      title="Sign off — this is what the payroll export pays">
+                Approve
               </button>
             </div>
           </div>

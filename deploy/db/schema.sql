@@ -135,3 +135,50 @@ create trigger ts_profiles_touch before update on public.ts_profiles
 alter table public.ts_timesheets drop constraint if exists ts_timesheets_ai_status_check;
 alter table public.ts_timesheets add constraint ts_timesheets_ai_status_check
   check (ai_status in ('ok','partial','failed','manual'));
+
+-- ---------- review workflow (Tier 1) -----------------------------------------
+-- A submission is an immutable payroll record; everything about REVIEWING it
+-- lives in these columns, which only an admin can write (via /api/admin/review).
+--   submitted   -> waiting for the admin
+--   approved    -> signed off; this is what payroll pays
+--   rejected    -> sent back, employee must resubmit
+--   superseded  -> a newer submission for the same person+period replaced it
+alter table public.ts_employee_edits
+  add column if not exists status      text not null default 'submitted',
+  add column if not exists reviewed_by uuid references public.auth_users(id),
+  add column if not exists reviewed_at timestamptz,
+  add column if not exists review_note text,
+  -- The numbers of record AFTER admin correction. Null means "no correction —
+  -- use what the employee submitted". Payroll reads coalesce(final_*, submitted).
+  add column if not exists final_regular  numeric,
+  add column if not exists final_overtime numeric,
+  add column if not exists final_total    numeric;
+
+alter table public.ts_employee_edits drop constraint if exists ts_employee_edits_status_check;
+alter table public.ts_employee_edits add constraint ts_employee_edits_status_check
+  check (status in ('submitted','approved','rejected','superseded'));
+
+create index if not exists ts_employee_edits_status_idx
+  on public.ts_employee_edits(year, month, status);
+
+-- Duplicate submissions used to double-count in the admin's totals. Rather than
+-- relying on the client to behave, the newest submission for a person+period
+-- automatically supersedes older ones that are still awaiting review. Approved
+-- and rejected rows are left alone so a completed decision is never rewritten.
+create or replace function public.ts_supersede_prior_submissions()
+returns trigger language plpgsql as $$
+begin
+  update public.ts_employee_edits
+     set status = 'superseded'
+   where user_id = new.user_id
+     and year    = new.year
+     and month   = new.month
+     and id     <> new.id
+     and status  = 'submitted';
+  return new;
+end; $$;
+
+drop trigger if exists ts_employee_edits_supersede on public.ts_employee_edits;
+create trigger ts_employee_edits_supersede
+  after insert on public.ts_employee_edits
+  for each row execute function public.ts_supersede_prior_submissions();

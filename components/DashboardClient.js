@@ -11,7 +11,7 @@ import { holidaysInMonth } from "@/lib/holidays";
 import { buildCalendar, rollup } from "@/lib/engine";
 import { validateTimesheet } from "@/lib/validate";
 
-export default function DashboardClient({ profile }) {
+export default function DashboardClient({ profile, submissions = [] }) {
   const api = createClient();
   const uid = profile.id;
   const fileInput = useRef(null);
@@ -22,6 +22,14 @@ export default function DashboardClient({ profile }) {
 
   const [period, setPeriod] = useState(defaultPeriod());
   const { month, year } = period;
+
+  // What (if anything) this employee has already submitted for the chosen month.
+  // Superseded rows are earlier attempts that a later submission replaced.
+  const mine = useMemo(
+    () => submissions.filter((s) => s.year === year && s.month === month),
+    [submissions, year, month]
+  );
+  const currentSubmission = mine.find((s) => s.status !== "superseded") || null;
   const holidays = useMemo(() => holidaysInMonth(year, month), [year, month]);
 
   const [mode, setMode] = useState("upload"); // upload | review
@@ -344,6 +352,32 @@ export default function DashboardClient({ profile }) {
         {savedMsg && <div className="alert ok" style={{ marginBottom: 16 }}>{savedMsg}
           <a style={{ marginLeft: "auto" }} onClick={resetForNew} role="button">Start another</a></div>}
 
+        {/* Proof of submission. Without this the dashboard is write-only: an
+            employee who submits and comes back sees an empty upload screen with
+            no sign anything happened — and no confirmation email exists yet. */}
+        {currentSubmission && mode === "upload" && !justSubmitted && (
+          <div className={"alert " + (currentSubmission.status === "approved" ? "ok"
+                          : currentSubmission.status === "rejected" ? "error" : "")}
+               style={{ marginBottom: 16, display: "block" }}>
+            <b>
+              {currentSubmission.status === "approved" ? "✓ Approved"
+                : currentSubmission.status === "rejected" ? "✗ Sent back for correction"
+                : "⏳ Submitted — awaiting review"}
+            </b>{" "}
+            for {MONTHS[month - 1]} {year} ·{" "}
+            {currentSubmission.final_total ?? currentSubmission.fields?.totals?.total ?? "—"} hours
+            {currentSubmission.final_total != null && (
+              <span className="muted"> (adjusted by your admin)</span>
+            )}
+            <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+              Submitted {new Date(currentSubmission.created_at).toLocaleDateString()}.
+              {currentSubmission.review_note ? ` Note from your admin: “${currentSubmission.review_note}”` : ""}
+              {currentSubmission.status !== "approved" &&
+                " Uploading again will replace this submission."}
+            </div>
+          </div>
+        )}
+
         {/* Shown in BOTH steps: UploadStep renders processError itself, but a
             failure while submitting from the review step had no render site,
             so a failed submit used to show the user nothing at all. */}
@@ -585,8 +619,8 @@ function SubmitSuccess({ period, totals, onClose, onNew }) {
         </div>
         <p className="muted" style={{ fontSize: 12, margin: "0 0 16px" }}>
           What happens next: an admin reviews your submission — you’ll be contacted
-          only if something needs a correction. You can still reopen and edit it
-          before it’s approved.
+          only if something needs a correction. If something needs changing before
+          then, submit the month again and your new version replaces this one.
         </p>
         <div className="row" style={{ justifyContent: "center", gap: 10 }}>
           <button className="btn btn-ghost" onClick={onNew}>Start another month</button>
