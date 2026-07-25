@@ -5,7 +5,8 @@ Tick these before running the CloudFormation deploy. ~10 minutes.
 ## 1. Access
 - [ ] AWS account with billing enabled
 - [ ] AWS CLI installed + logged in → `aws sts get-caller-identity` shows your account
-- [ ] Region picked (default **us-east-1** = cheapest)
+- [ ] Region picked and used **consistently** — the same value must go in
+      `STORAGE_S3_REGION`, or every upload fails (us-east-1 is cheapest)
 
 ## 2. Stack inputs (Phase 1 parameters)
 - [ ] **VPC id** — default VPC is fine: `aws ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text`
@@ -17,7 +18,7 @@ Tick these before running the CloudFormation deploy. ~10 minutes.
 - [ ] **S3 bucket name** — globally unique (e.g. `ajace-ts-files-<something>`)
 - [ ] **BudgetAlertEmail** — where the $15/mo budget alerts go (free)
 
-## 3. App secrets (go in app/.env.production)
+## 3. App secrets (go in .env.production at the repo root)
 - [ ] **OPENROUTER_API_KEY** (Direct++ AI)
 - [ ] **AUTH_JWT_SECRET** — leave the placeholder; `install.sh` auto-generates it
 - [ ] Raw EC2 URL for now → **COOKIE_SECURE=false**, **SITE_URL=http://<EC2-IP>**
@@ -29,7 +30,8 @@ Tick these before running the CloudFormation deploy. ~10 minutes.
 - [ ] ~**$28/mo** steady (~$14 first year) + OpenRouter usage
 - [ ] **$15/mo budget** auto-created by the stack (alerts only) — or `scripts/budget.sh`
 - [ ] To truly stay ≤ $15 after the free year: run intermittently (`instance.sh stop`)
-- [ ] Know the pause options: `instance.sh stop` (compute only) · `teardown.sh` (snapshot + delete)
+- [ ] Know the pause options: `instance.sh stop` (compute only, data kept) ·
+      `teardown.sh` / `aws-cli-destroy.sh` (**deletes everything, irreversible**)
 
 ## 6. Post-launch smoke test
 - [ ] Stack **CREATE_COMPLETE**; noted **AppPublicIP** + **DBEndpoint**
