@@ -28,7 +28,10 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 STATE="$HERE/.aws-state"
 touch "$STATE"
 save() { grep -q "^$1=" "$STATE" 2>/dev/null || echo "$1=$2" >> "$STATE"; }
-get()  { grep "^$1=" "$STATE" 2>/dev/null | tail -1 | cut -d= -f2-; }
+# NOTE the trailing `|| true`: on a first run the state file is empty, so grep
+# exits 1 — and under `set -euo pipefail` a bare `X=$(get X)` would abort the
+# whole script silently. A miss must look like an empty value, not a failure.
+get()  { grep "^$1=" "$STATE" 2>/dev/null | tail -1 | cut -d= -f2- || true; }
 A() { aws --region "$REGION" "$@"; }
 
 ACCOUNT=$(A sts get-caller-identity --query Account --output text)
