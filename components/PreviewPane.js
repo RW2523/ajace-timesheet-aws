@@ -4,9 +4,11 @@ import { useState } from "react";
 // Renders the source document beside the form so the user can cross-verify.
 // Two modes:
 //   pages — engine-rendered PNGs (any format; needs the Python engine)
-//   doc   — browser-native rendering: { url, kind: "pdf" | "image" | "other" }
-//           PDFs use the browser's built-in viewer, images render directly.
-//           "other" (Excel/Word without an engine) shows a friendly notice.
+//   doc   — browser-native rendering:
+//             { url, kind: "pdf" | "image" }  PDFs use the browser's viewer,
+//                                             images render directly
+//             { html, kind: "html" }          Excel/Word converted in-process
+//             { kind: "other" }               nothing we can render
 export default function PreviewPane({ pages, doc, loading, fileName, onClose }) {
   const [zoom, setZoom] = useState(1);
   const clamp = (z) => Math.min(4, Math.max(0.4, z));
@@ -14,7 +16,8 @@ export default function PreviewPane({ pages, doc, loading, fileName, onClose }) 
   const hasPages = pages && pages.length > 0;
   const isPdf = !hasPages && doc?.kind === "pdf" && doc?.url;
   const isImage = !hasPages && doc?.kind === "image" && doc?.url;
-  const isOther = !hasPages && doc && !isPdf && !isImage;
+  const isHtml = !hasPages && doc?.kind === "html" && doc?.html;
+  const isOther = !hasPages && doc && !isPdf && !isImage && !isHtml;
   const zoomable = hasPages || isImage; // PDFs zoom via the browser's own viewer
 
   return (
@@ -50,12 +53,25 @@ export default function PreviewPane({ pages, doc, loading, fileName, onClose }) 
           <iframe className="pv-frame" src={doc.url} title={fileName || "document"} />
         )}
         {!loading && isImage && <img src={doc.url} alt={fileName || "document"} />}
+        {!loading && isHtml && (
+          // SANDBOXED. The markup is derived from an uploaded file, so it is
+          // untrusted: `sandbox` with no allow-* tokens gives it an opaque
+          // origin with scripting disabled, and srcdoc keeps it same-document
+          // without a network fetch. Never render this via dangerouslySetInnerHTML.
+          <iframe
+            className="pv-frame"
+            sandbox=""
+            srcDoc={doc.html}
+            title={fileName || "document"}
+            style={{ background: "#fff" }}
+          />
+        )}
         {!loading && isOther && (
           <div className="pv-note">
             <div style={{ fontSize: 26 }}>📊</div>
             <b>No in-browser preview for this file type.</b>
             <span>
-              Spreadsheets and Word files can’t be rendered here
+              This format can’t be rendered here
               {doc?.url ? " — open the original instead." : "."}
             </span>
             {doc?.url && (

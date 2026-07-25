@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/api/server";
 import { previewUpload } from "@/lib/engine";
+import { renderOfficePreview, isOfficePreviewable } from "@/lib/aws/officepreview";
 
 export const maxDuration = 120;
 
@@ -26,6 +27,16 @@ export async function POST(request) {
   if (!file) return NextResponse.json({ error: "file required" }, { status: 400 });
 
   const fallback = { doc: { kind: "other" } };
+  const name = file.name || "upload";
+
+  // Spreadsheets and Word documents render in-process (SheetJS / mammoth) — no
+  // Python engine and no LibreOffice needed. This is the common case: most
+  // timesheets arrive as .xlsx.
+  if (isOfficePreviewable(name)) {
+    const doc = await renderOfficePreview(Buffer.from(await file.arrayBuffer()), name);
+    if (doc) return NextResponse.json({ doc });
+  }
+
   if (!process.env.ENGINE_URL) {
     return NextResponse.json(fallback);   // pure-serverless deployment
   }

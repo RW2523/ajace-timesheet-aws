@@ -583,11 +583,17 @@ function DocPreviewPanel({ api, path, fileName, onClose }) {
           {!loading && !err && doc?.kind === "image" && (
             <img src={doc.url} alt={fileName || "document"} />
           )}
-          {!loading && !err && doc && doc.kind !== "pdf" && doc.kind !== "image" && (
+          {!loading && !err && doc?.kind === "html" && (
+            // Sandboxed: this markup comes from an employee-uploaded document.
+            // No allow-* tokens => opaque origin, scripting disabled.
+            <iframe className="pv-frame" sandbox="" srcDoc={doc.html}
+                    title={fileName || "document"} style={{ background: "#fff" }} />
+          )}
+          {!loading && !err && doc && !["pdf", "image", "html"].includes(doc.kind) && (
             <div className="pv-note">
               <div style={{ fontSize: 26 }}>📊</div>
               <b>No in-browser preview for this file type.</b>
-              <span>Spreadsheets and Word files can’t be rendered here — open the original instead.</span>
+              <span>This format can’t be rendered here — open the original instead.</span>
               <a className="btn btn-ghost btn-sm" onClick={openOriginal} role="button">Open original ↗</a>
             </div>
           )}

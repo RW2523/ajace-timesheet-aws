@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/api/server";
 import { previewUpload } from "@/lib/engine";
+import { renderOfficePreview, isOfficePreviewable } from "@/lib/aws/officepreview";
 
 export const maxDuration = 120;
 
@@ -38,6 +39,17 @@ export async function POST(request) {
   // signed URL instead of engine-rendered PNGs (works with no engine at all).
   // Office files still need the engine's renderer; without one, return the
   // signed URL as a download so the admin can open the original.
+  // Office files: fetch the stored object and render it to HTML in-process, so
+  // the admin can read an .xlsx timesheet beside the calendar instead of having
+  // to download it.
+  if (kind === "other" && isOfficePreviewable(fileName)) {
+    const { data: blob } = await api.storage.from("ts-uploads").download(path);
+    if (blob) {
+      const doc = await renderOfficePreview(Buffer.from(await blob.arrayBuffer()), fileName);
+      if (doc) return NextResponse.json({ doc });
+    }
+  }
+
   if (kind !== "other" || !process.env.ENGINE_URL) {
     const { data: signed, error: serr } = await api.storage
       .from("ts-uploads").createSignedUrl(path, 600);
