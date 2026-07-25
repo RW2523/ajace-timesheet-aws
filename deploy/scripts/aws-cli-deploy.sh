@@ -201,17 +201,19 @@ NEXT — install the app on the box:
   ssh -i $KEY.pem ubuntu@$IP
   git clone https://github.com/RW2523/ajace-timesheet-aws.git
   cd ajace-timesheet-aws
-  cp deploy/env.production.example .env.production
-  nano app/.env.production      # paste the block below, add your OpenRouter key
+  nano .env.production          # paste the block below, save, exit
   bash deploy/scripts/install.sh
 
   DATABASE_URL=postgresql://tsadmin:$DBPASS@$EP:5432/timesheet
   STORAGE_S3_BUCKET=$BUCKET
   STORAGE_S3_REGION=$REGION
+  PG_POOL_MAX=5
   DIRECT_SERVERLESS=true
   OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-sk-or-REPLACE}
   NEXT_PUBLIC_AI_ENABLED=true
+  AUTH_JWT_SECRET=CHANGE_ME_openssl_rand_base64_48
   COOKIE_SECURE=false
+  SITE_URL=http://$IP
   NODE_ENV=production
 
 Then open  http://$IP
