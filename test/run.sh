@@ -14,8 +14,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SUITE=(data-layer review-flow derived-totals derivation-escape)
 
-run_suite() {  # $1 = connection string
-  export DATABASE_URL="$1" PGSSL="${PGSSL:-disable}"
+run_suite() {  # $1 = connection string, $2 = "disable" for plaintext, else TLS
+  export DATABASE_URL="$1"
+  # Set explicitly from the argument. Do NOT write this as ${PGSSL:-disable}:
+  # `:-` substitutes on EMPTY as well as unset, so passing PGSSL="" still
+  # selected "disable" and node connected to RDS in the clear, which RDS
+  # rejects with "no pg_hba.conf entry ... no encryption".
+  if [ "${2:-}" = "disable" ]; then export PGSSL=disable; else unset PGSSL; fi
   local rc=0
   for t in "${SUITE[@]}"; do
     node "$ROOT/test/$t.test.mjs" || rc=1
@@ -37,7 +42,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   done
   PGPASSWORD=postgres psql -h 127.0.0.1 -p "$PORT" -U postgres -d timesheet \
     -v ON_ERROR_STOP=1 -q -f "$ROOT/deploy/db/schema.sql"
-  run_suite "postgresql://postgres:postgres@127.0.0.1:$PORT/timesheet"
+  run_suite "postgresql://postgres:postgres@127.0.0.1:$PORT/timesheet" disable
   exit $?
 fi
 
@@ -50,12 +55,24 @@ fi
 BASE="${DATABASE_URL%/*}"                 # everything up to the db name
 LIVE_DB="${DATABASE_URL##*/}"
 SCRATCH="ts_test_$$"
+# Kept separate because run_suite re-exports DATABASE_URL to point at the
+# scratch database: dropping it through that connection would fail with
+# "cannot drop the currently open database" and leak the scratch DB on RDS.
+ADMIN_URL="$DATABASE_URL"
 echo "==> scratch database $SCRATCH on the same server (live '$LIVE_DB' untouched)"
 drop_scratch() {
-  psql "$DATABASE_URL" -q -c "drop database if exists $SCRATCH" >/dev/null 2>&1 || true
+  psql "$ADMIN_URL" -q -c "drop database if exists $SCRATCH" >/dev/null 2>&1 || true
 }
 trap drop_scratch EXIT
-psql "$DATABASE_URL" -q -c "create database $SCRATCH" >/dev/null
+# Sweep scratch databases left behind by an interrupted run. They are ours by
+# name and always disposable, so a leak never accumulates on a shared RDS.
+for old in $(psql "$ADMIN_URL" -tAc \
+      "select datname from pg_database where datname like 'ts\\_test\\_%'" 2>/dev/null); do
+  echo "    dropping orphaned $old"
+  psql "$ADMIN_URL" -q -c "drop database if exists $old" >/dev/null 2>&1 || true
+done
+
+psql "$ADMIN_URL" -q -c "create database $SCRATCH" >/dev/null
 psql "$BASE/$SCRATCH" -v ON_ERROR_STOP=1 -q -f "$ROOT/deploy/db/schema.sql"
-# RDS needs TLS; the schema/pool use the AWS CA chain, so don't force it off here.
-PGSSL="${PGSSL:-}" run_suite "$BASE/$SCRATCH"
+# No second argument => TLS, which RDS requires.
+run_suite "$BASE/$SCRATCH"
