@@ -305,10 +305,11 @@ export default function DashboardClient({ profile, submissions = [] }) {
         submitted: true,
       });
       if (error) throw error;
-      // keep ts_timesheets totals in sync with the latest edit
+      // Keep ts_timesheets in sync with the latest edit. `days` is sent so the
+      // server DERIVES the totals — previously this posted monthly_* directly
+      // with no days, so those columns came straight from the browser.
       await api.from("ts_timesheets").update({
-        monthly_regular: r.regular, monthly_overtime: r.overtime,
-        monthly_total: r.total, days_worked: r.daysWorked,
+        days: calendar,
         questionnaire: { ...q, holidayWork },
         validation: { errors: validation.errors, warnings: validation.warnings },
       }).eq("id", tid);
