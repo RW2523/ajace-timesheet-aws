@@ -134,6 +134,33 @@ else
 fi
 cd "$ROOT"
 
+# ---------------------------------------------------------------- procurement
+# The second app is optional: if the repo is cloned beside this one, bring it up
+# too. Same database (shared logins), same S3 bucket, its own port + prefix.
+PROC="$(cd "$ROOT/.." && pwd)/procurement-intelligence-platform"
+if [ -d "$PROC" ]; then
+  echo "==> [5b/8] procurement app"
+  if [ ! -f "$PROC/.env.production" ]; then
+    cp "$PROC/deploy/env.production.example" "$PROC/.env.production" 2>/dev/null || true
+    echo "    created procurement/.env.production — EDIT IT then re-run."
+    echo "    AUTH_JWT_SECRET must MATCH this app's, or its login won't work."
+    exit 1
+  fi
+  # The shared session only works if both apps sign with the same secret.
+  TS_SECRET=$(grep '^AUTH_JWT_SECRET=' "$ENVF" | cut -d= -f2-)
+  PR_SECRET=$(grep '^AUTH_JWT_SECRET=' "$PROC/.env.production" | cut -d= -f2-)
+  if [ "$TS_SECRET" != "$PR_SECRET" ]; then
+    echo "    ⚠ AUTH_JWT_SECRET differs between the two apps — syncing procurement to match."
+    awk -v s="$TS_SECRET" '/^AUTH_JWT_SECRET=/{print "AUTH_JWT_SECRET="s; next} {print}' \
+      "$PROC/.env.production" > "$PROC/.env.production.tmp" && mv "$PROC/.env.production.tmp" "$PROC/.env.production"
+  fi
+  ( cd "$PROC" && npm ci --no-audit --no-fund || (cd "$PROC" && npm install --no-audit --no-fund) )
+  # Procurement's tables live in the SAME database as the timesheet's.
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$PROC/deploy/db/schema.sql"
+  ( cd "$PROC" && NEXT_TELEMETRY_DISABLED=1 npm run build )
+  echo "    procurement built"
+fi
+
 echo "==> [6/8] start under pm2 (+ boot on reboot)"
 pm2 startOrReload "$HERE/ecosystem.config.cjs" --update-env
 pm2 save
@@ -159,7 +186,15 @@ sleep 3
 CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 http://127.0.0.1:3009/api/health || echo 000)
 echo
 if [ "$CODE" = "200" ]; then
-  echo "✅ App is LIVE at:  http://${IP:-<this-box-ip>}"
+  echo "✅ Timesheet is LIVE at:   http://${IP:-<this-box-ip>}"
+  if [ -d "$PROC" ]; then
+    PCODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 http://127.0.0.1:3002/procurement/login || echo 000)
+    if [ "$PCODE" = "200" ] || [ "$PCODE" = "307" ]; then
+      echo "✅ Procurement is LIVE at: http://${IP:-<this-box-ip>}/procurement"
+    else
+      echo "⚠ Procurement did not answer on :3002 (HTTP $PCODE) — pm2 logs ajace-procurement"
+    fi
+  fi
 else
   echo "⚠ App did not answer on :3009 (HTTP $CODE). Check:  pm2 logs ajace-timesheet --lines 40 --nostream"
 fi

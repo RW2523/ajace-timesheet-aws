@@ -1,28 +1,39 @@
-// PM2 process file for the Timesheet app (AWS-native).
+// PM2 process file — BOTH AJACE apps on one box.
 //   pm2 startOrReload ecosystem.config.cjs && pm2 save && pm2 startup
+//
+// Memory limits matter here: 2 GB total, and swapon does not work on this
+// kernel, so a runaway process must be restarted rather than allowed to invoke
+// the OOM killer (which would take the other app down with it).
+const common = {
+  env: { NODE_ENV: "production" },
+  autorestart: true,
+  restart_delay: 5000,
+  exp_backoff_restart_delay: 200,
+  min_uptime: 10000,
+  max_restarts: 10,
+  merge_logs: true,
+  time: true,
+};
+
 module.exports = {
   apps: [
     {
+      ...common,
       name: "ajace-timesheet",
       cwd: "/home/ubuntu/ajace-timesheet-aws",
       script: "npm",
       args: "run start",              // next start -p 3009
-      env: { NODE_ENV: "production" },
       max_memory_restart: "600M",
-
-      autorestart: true,
-      // Crash-loop protection. Without these, a process that dies instantly
-      // (e.g. a missing .next build) gets restarted as fast as it can exit,
-      // appending to ~/.pm2/logs without bound — which can fill the root
-      // volume and take the whole box down. Back off, then give up so the
-      // failure is visible in `pm2 status` instead of hidden in a loop.
-      restart_delay: 5000,             // 5s between restarts
-      exp_backoff_restart_delay: 200,  // ...growing if it keeps failing
-      min_uptime: 10000,               // must survive 10s to count as healthy
-      max_restarts: 10,                // then stop and stay stopped
-      // install.sh also configures pm2-logrotate (10 MB x 5, compressed).
-      merge_logs: true,
-      time: true,
+    },
+    {
+      ...common,
+      name: "ajace-procurement",
+      cwd: "/home/ubuntu/procurement-intelligence-platform",
+      script: "npm",
+      args: "run start -- -p 3002",
+      // Roomier: crawls parse HTML and buffer attachments. Still bounded so it
+      // can never starve the timesheet app during payroll.
+      max_memory_restart: "700M",
     },
   ],
 };
