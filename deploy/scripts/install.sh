@@ -116,7 +116,7 @@ fi
 export NEXT_TELEMETRY_DISABLED=1
 
 cd "$APPDIR"
-npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+npm ci --include=dev --no-audit --no-fund || npm install --include=dev --no-audit --no-fund
 rm -rf "$APPDIR/.next.prev"
 # Keep the last good build so a failed build can never leave pm2 with no .next
 # (that is what produced the "Could not find a production build" crash loop).
@@ -154,7 +154,12 @@ if [ -d "$PROC" ]; then
     awk -v s="$TS_SECRET" '/^AUTH_JWT_SECRET=/{print "AUTH_JWT_SECRET="s; next} {print}' \
       "$PROC/.env.production" > "$PROC/.env.production.tmp" && mv "$PROC/.env.production.tmp" "$PROC/.env.production"
   fi
-  ( cd "$PROC" && npm ci --no-audit --no-fund || (cd "$PROC" && npm install --no-audit --no-fund) )
+  # NOTE --include=dev: install.sh sources .env.production, which sets
+  # NODE_ENV=production, and npm then SKIPS devDependencies. Build-time tooling
+  # (Tailwind's PostCSS plugin, TypeScript) lives there, so the build fails
+  # without it. Runtime is unaffected — this only matters while building.
+  ( cd "$PROC" && npm ci --include=dev --no-audit --no-fund \
+      || (cd "$PROC" && npm install --include=dev --no-audit --no-fund) )
   # Procurement's tables live in the SAME database as the timesheet's.
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$PROC/deploy/db/schema.sql"
   ( cd "$PROC" && NEXT_TELEMETRY_DISABLED=1 npm run build )
