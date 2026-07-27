@@ -39,6 +39,19 @@ if (process.env.COOKIE_SECURE === "true") {
 }
 
 const nextConfig = {
+  // Deploys must NEVER build into the directory the live server is reading.
+  // `next start` resolves every static chunk and every not-yet-required server
+  // bundle from distDir BY PATH, at request time (next/dist/server/require.js
+  // requirePage(), router-utils/filesystem.js nextStaticFolderPath), and it
+  // re-reads BUILD_ID from distDir on boot. So a build that empties .next takes
+  // payroll down for the whole build, and any restart in that window dies with
+  // "Could not find a production build in the '.next' directory".
+  //
+  // deploy/scripts/install.sh therefore builds with NEXT_DIST_DIR=.next.build
+  // and renames the finished directory into place. `next start` runs WITHOUT
+  // that variable, so the SERVER always reads plain `.next` — distDir is loaded
+  // from this file at runtime, never baked into the build output.
+  distDir: process.env.NEXT_DIST_DIR || ".next",
   reactStrictMode: true,
   poweredByHeader: false,
   env: {

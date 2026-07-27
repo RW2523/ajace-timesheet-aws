@@ -62,8 +62,17 @@ cat <<EOF
 Finish on the box:
   ssh -i ajace-key.pem ubuntu@$EIP
   cd ~/ajace-timesheet-aws
-  sed -i "s#^SITE_URL=.*#SITE_URL=http://$EIP#" .env.production
   bash deploy/scripts/install.sh
+
+  install.sh sets SITE_URL itself. If deploy/site.env has a SITE_HOSTNAME (i.e.
+  this box is already on HTTPS) it keeps https://<hostname>; only on a plain-HTTP
+  box does it fall back to http://$EIP. Do NOT sed SITE_URL back to an IP by hand
+  afterwards — that emails users dead password-reset links.
+
+Next step, if this box should be on a real domain over HTTPS:
+  point a DNS A record at $EIP (Cloudflare proxy OFF), then on the box:
+  bash deploy/scripts/enable-https.sh <hostname> <your-email>
+  Runbook: deploy/docs/HTTPS-CUTOVER.md
 
 Emergency access without SSH (works even if your IP changed):
   aws ssm start-session --target $IID --region $REGION

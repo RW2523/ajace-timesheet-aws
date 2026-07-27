@@ -1,10 +1,31 @@
 node_modules/
 .next/
 .next.prev/
+# transient build dir: install.sh builds here (NEXT_DIST_DIR) and renames it
+# onto .next, so the live server never reads a half-written build.
+.next.build/
 .env
 .env.local
 .env.production
+.env.production.pre-https.*
 *.pem
 deploy/.aws-state*
+# The box's own hostname/ACME settings — machine-local, never committed. This is
+# what makes the HTTPS hostname survive both `git pull` and the next deploy.
+deploy/site.env
+deploy/site.env.pre-https.*
+deploy/.https-rollback-*
+# Written per cutover run beside the rollback script: the emergency downgrade to
+# plain HTTP, and the record of what the cutover ACTUALLY did. Both name this
+# box's hostname and IP and are meaningless on any other box; the progress file
+# in particular is the only record that step [8b] is still outstanding, so it
+# must not be shared between boxes by a commit. Their own headers already say
+# "machine-local, not in git" — these two lines make that true.
+deploy/.https-emergency-plain-http-*
+deploy/.https-cutover-progress
+# Which commits this box last built (install.sh writes it, enable-https.sh's
+# rollback reads it to restore the checkout). Machine state — must NOT be
+# committed, or every box would claim to be running whatever was checked in.
+deploy/.deployed-commits
 .DS_Store
 npm-debug.log*

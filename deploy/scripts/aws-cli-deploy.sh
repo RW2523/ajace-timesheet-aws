@@ -217,6 +217,15 @@ NEXT — install the app on the box:
   NODE_ENV=production
 
 Then open  http://$IP
+
+Put it on a real domain with HTTPS (do this AFTER stable-ip.sh, and read the
+runbook first — the order matters, COOKIE_SECURE=true before TLS works locks
+every user out of payroll):
+  bash deploy/scripts/stable-ip.sh              # from here
+  # create the DNS A record, Cloudflare proxy OFF
+  bash deploy/scripts/enable-https.sh <hostname> <email>   # on the box
+  deploy/docs/HTTPS-CUTOVER.md
+
 Tear it all down later:  bash deploy/scripts/aws-cli-destroy.sh
 ════════════════════════════════════════════════════════════════════
 EOF
