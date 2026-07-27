@@ -343,10 +343,20 @@ apply_schema() {
     echo "    $label schema applied"
     return 0
   fi
-  echo "    ✗ applying the $label schema FAILED." >&2
-  echo "      'canceling statement due to lock timeout' above means NOTHING was" >&2
-  echo "      changed — something else held a lock on a table the DDL needed." >&2
-  echo "      Wait until staff are not submitting timesheets, then re-run." >&2
+  # Do NOT assert a cause here. This block used to state flatly that the failure
+  # was a lock timeout and that nothing had changed; on the live box the real
+  # error was "cannot change return type of existing function", and the operator
+  # was told to wait for staff to stop submitting timesheets — advice that would
+  # never have fixed it. Read psql's own message above; it is the truth.
+  echo "    ✗ applying the $label schema FAILED — read psql's error above." >&2
+  echo "      Every statement ran inside ON_ERROR_STOP, so the schema stopped at" >&2
+  echo "      the first failure and anything below it (including the migration" >&2
+  echo "      chain) did NOT run." >&2
+  echo "      · 'canceling statement due to lock timeout' → something held a lock" >&2
+  echo "        on a table the DDL needed. Nothing changed; re-run when staff are" >&2
+  echo "        not submitting timesheets." >&2
+  echo "      · anything else → a real schema defect. Re-running will fail the" >&2
+  echo "        same way until it is fixed in the repo." >&2
   return 1
 }
 apply_schema timesheet "$HERE/db/schema.sql"
