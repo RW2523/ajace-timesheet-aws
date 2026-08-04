@@ -1,9 +1,25 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 
+// "" / null / a non-numeric value all mean "no hours", never NaN — a NaN would
+// propagate into `days` and land in the append-only edit row.
+function num(v) {
+  if (v === "" || v === null || v === undefined) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 export default function DayModal({ day, onSave, onClose }) {
   const [reg, setReg] = useState(day.regular ?? "");
   const [ot, setOt] = useState(day.overtime ?? "");
+  // Paid-but-not-worked time (sick / vacation / holiday pay). It is summed into
+  // the monthly total by lib/engine.js rollup() AND by lib/aws/data.js
+  // deriveTotals(), i.e. it is PAID — but nothing in the UI ever showed it and
+  // nothing here could clear it, so "Clear day" left payable hours behind on a
+  // day that then rendered as empty. It is not free-text editable (the split
+  // between sick/vacation/holiday only exists in the extraction), but it is now
+  // visible and removable.
+  const [otherHrs, setOtherHrs] = useState(day.other ?? null);
   const [note, setNote] = useState(day.note ?? "");
   const dialogRef = useRef(null);
   const restoreFocusTo = useRef(null);
@@ -33,16 +49,25 @@ export default function DayModal({ day, onSave, onClose }) {
   }, [onClose]);
 
   function save() {
-    const r = reg === "" ? null : Number(reg);
-    const o = ot === "" ? null : Number(ot);
-    const total = r == null && o == null ? null : (r || 0) + (o || 0);
+    const r = num(reg);
+    const o = num(ot);
+    const oth = num(otherHrs);
+    // `other` MUST be part of both `total` and `filled`. It used to survive the
+    // `...day` spread while being left out of both, so after any manual edit the
+    // day reported fewer hours than the server would derive from it, and the
+    // cell rendered "—" for a day that still paid.
+    const any = r != null || o != null || (oth != null && oth !== 0);
+    const total = any ? (r || 0) + (o || 0) + (oth || 0) : null;
     onSave({
       ...day,
       regular: r,
       overtime: o,
+      other: oth,
       total,
       note: note || null,
-      filled: r != null || o != null,
+      filled: any,
+      // keep the holiday flag honest with the hours that are actually on the day
+      workedOnHoliday: day.isHoliday ? (total || 0) > 0 : false,
       flagged: false, // manual edit clears the AI flag
     });
   }
@@ -80,13 +105,31 @@ export default function DayModal({ day, onSave, onClose }) {
                 onChange={(e) => setOt(e.target.value)} placeholder="0" />
             </div>
           </div>
+          {otherHrs ? (
+            <div className="field">
+              <label>Paid time off on this day</label>
+              <div className="between">
+                <span>
+                  <b>{otherHrs}h</b>{" "}
+                  <span className="muted">sick / vacation / holiday pay</span>
+                </span>
+                <button className="btn btn-ghost btn-sm" onClick={() => setOtherHrs(null)}>
+                  Remove
+                </button>
+              </div>
+              <span className="hint">
+                Counted in your monthly total, but not in billable regular hours.
+              </span>
+            </div>
+          ) : null}
           <div className="field">
             <label htmlFor="day-note">Note (optional)</label>
             <input id="day-note" value={note} onChange={(e) => setNote(e.target.value)}
               placeholder="e.g. PTO, client site, sick" />
           </div>
           <div className="between" style={{ marginTop: 8 }}>
-            <button className="btn btn-ghost btn-sm" onClick={() => { setReg(""); setOt(""); setNote(""); }}>
+            <button className="btn btn-ghost btn-sm"
+              onClick={() => { setReg(""); setOt(""); setOtherHrs(null); setNote(""); }}>
               Clear day
             </button>
             <div className="row">

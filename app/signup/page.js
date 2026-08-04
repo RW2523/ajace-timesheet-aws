@@ -108,7 +108,8 @@ export default function SignupPage() {
 function Field({ label, req, hint, children }) {
   return (
     <div className="field">
-      <label>{label} {req && <span style={{ color: "var(--red)" }}>*</span>}</label>
+      {/* the shared `.req` marker (globals.css), not a local red asterisk */}
+      <label>{label}{req && <span className="req" title="Required" aria-hidden="true">*</span>}</label>
       {children}
       {hint && <span className="hint">{hint}</span>}
     </div>

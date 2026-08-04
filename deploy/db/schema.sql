@@ -131,6 +131,23 @@ create trigger ts_profiles_touch before update on public.ts_profiles
 -- `create table if not exists` above skips existing tables, so schema changes
 -- must also be expressed as idempotent ALTERs. Safe to re-run.
 
+-- Resumable draft. Correcting a 31-day grid is a long, once-a-month sitting, and
+-- re-running the extraction costs minutes (docs/PROCESSING-TIME.md). Everything
+-- the review screen needs to come back exactly as it was — EXCEPT the hours —
+-- lives in this one jsonb blob: the identity fields, the questionnaire answers,
+-- the holiday Worked/Not-worked map, the AI metadata, and the frozen extraction
+-- the holiday "Worked" lookup restores from.
+--
+-- THE HOURS ARE DELIBERATELY NOT IN HERE. A draft's hours are `days`, the same
+-- column the server derives monthly_regular/overtime/total/days_worked from
+-- (lib/aws/data.js). Keeping a second copy of hours in an underived column is
+-- exactly how a draft would come back with different numbers than it saved.
+--
+-- NULL means "no draft" — the marker is the column itself, so nothing has to
+-- interpret an empty object. Submitting sets it back to NULL.
+alter table public.ts_timesheets
+  add column if not exists draft jsonb;
+
 -- 'manual' is written by the "Enter manually instead" flow.
 alter table public.ts_timesheets drop constraint if exists ts_timesheets_ai_status_check;
 alter table public.ts_timesheets add constraint ts_timesheets_ai_status_check

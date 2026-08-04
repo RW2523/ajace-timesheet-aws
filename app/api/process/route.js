@@ -62,6 +62,11 @@ export async function POST(request) {
       llm_used: result.llm_used,
       flow: result.flow || flow,
       review_status: result.review_status || null,
+      // Manager approval, lifted to the top level so the client doesn't have to
+      // dig for it. null = this flow never looked (the Python engine has no
+      // approval block yet) — which the UI must treat as "ask the employee",
+      // never as "approved".
+      approval: employee?.approval || null,
       agent_trace: result.agent_trace || null,
       file_name: result.file_name,
       raw_employees: result.employees,
@@ -80,9 +85,14 @@ async function processServerless(file, month, year) {
   try {
     const { buildModelInput } = await import("@/lib/directpp/input.js");
     const { directExtract } = await import("@/lib/directpp/extractor.js");
+    // ITEM 9 — the two stages worth a stopwatch: turning the file into model
+    // input (image upsampling is the only non-trivial CPU cost) and the model
+    // calls themselves. Timing only; nothing here reads or writes hours.
+    const t0 = Date.now();
     const buffer = Buffer.from(await file.arrayBuffer());
     const input = await buildModelInput(buffer, fileName);
-    const { employee, trace, reason } = await directExtract({
+    const inputMs = Date.now() - t0;
+    const { employee, trace, timings, reason } = await directExtract({
       input, fileName, month, year,
     });
     if (!employee) {
@@ -101,8 +111,17 @@ async function processServerless(file, month, year) {
       llm_used: true,
       flow: "direct_serverless",
       review_status: employee.review_status,
+      approval: employee.approval || null,
+      timings: { input_ms: inputMs,
+                 model_ms: timings?.model_ms ?? null,
+                 total_ms: Date.now() - t0,
+                 calls: timings?.calls || [] },
       agent_trace: { file: fileName, flow: "direct_serverless",
-                     handled_by: "DirectReader", actions: trace },
+                     handled_by: "DirectReader", actions: trace,
+                     timings: { input_ms: inputMs,
+                                model_ms: timings?.model_ms ?? null,
+                                total_ms: Date.now() - t0,
+                                calls: timings?.calls || [] } },
       file_name: fileName,
       raw_employees: [employee],
     });

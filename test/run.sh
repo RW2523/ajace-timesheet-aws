@@ -12,7 +12,36 @@
 # dropped at the end, and the suite refuses to run without one.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SUITE=(data-layer review-flow derived-totals derivation-escape)
+SUITE=(data-layer review-flow derived-totals derivation-escape draft-resume)
+
+# Syntax gate first: needs no database, so it runs even when the DB checks
+# below would abort. Do NOT replace this with `node --check`: on Node >= 20 a
+# file containing import/export is treated as ESM and `--check` exits 0 without
+# reporting parse errors, so it is green on every file in app/, components/ and
+# lib/ no matter how broken they are. See the header of test/syntax.test.mjs.
+echo "==> syntax gate"
+node "$ROOT/test/syntax.test.mjs"
+
+# Pure-function checks that need no database either, so they also run on a box
+# with no DATABASE_URL. bulk-fill asserts what the SERVER derives from a
+# bulk-filled `days` array, so it must not be skippable.
+echo "==> pure checks"
+node "$ROOT/test/bulk-fill.test.mjs"
+# holiday-toggle asserts what the SERVER derives after the US-holiday
+# Worked / Not-worked clicks, so it must not be skippable either.
+node "$ROOT/test/holiday-toggle.test.mjs"
+# questionnaire-contract compares DashboardClient's <Questionnaire> call against
+# Questionnaire's own parameter list. React drops unknown props and defaults
+# missing ones in silence, so a mismatch here is invisible to the syntax gate
+# and to every behavioural test — it shipped once, and it disabled the holiday
+# toggles (hours stayed in `days` and were still paid) and the manager-approval
+# seeding (every employee asked to attest "not approved"). Needs no database.
+node "$ROOT/test/questionnaire-contract.test.mjs"
+# preview asserts that the file picker refuses exactly what /api/storage/upload
+# refuses, and that every accepted extension has a defined preview outcome. A
+# regression here detaches a document from a payroll submission with only an
+# amber note. Needs no database.
+node "$ROOT/test/preview.test.mjs"
 
 run_suite() {  # $1 = connection string, $2 = "disable" for plaintext, else TLS
   export DATABASE_URL="$1"

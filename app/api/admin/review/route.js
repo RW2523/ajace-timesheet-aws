@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { currentUser } from "@/lib/aws/auth";
-import { queryOne } from "@/lib/aws/db";
+import { pool } from "@/lib/aws/db";
 import { audit } from "@/lib/aws/audit";
 import { clientIp } from "@/lib/aws/ratelimit";
 
@@ -12,54 +12,189 @@ export const runtime = "nodejs";
 // a payroll record). Review is a separate, admin-only action that touches only
 // review columns, so the employee's original submission is preserved verbatim
 // alongside the decision and any corrected totals.
+//
+// CORRECTED HOURS ARE DERIVED HERE, SERVER-SIDE, FROM `days`.
+// final_regular/final_overtime/final_total are what the payroll CSV actually
+// pays (export/route.js coalesces them over the submitted totals). They used to
+// be taken verbatim from the request body, which bypassed the invariant that
+// lib/aws/data.js enforces for every other money-bearing write: a hand-crafted
+// POST from any admin session could set the paid number to anything, with no
+// `days` to justify it. Now the only accepted correction inputs are:
+//   * `days` — the day grid; totals are summed from it (the normal path);
+//   * `summaryTotals` — regular + overtime only, and ONLY for a submission that
+//     genuinely has no per-day breakdown (a document that stated weekly or
+//     monthly summary figures). `total` is still computed, never accepted.
 const ALLOWED = new Set(["submitted", "approved", "rejected"]);
+
+// Legal transitions. Previously any status could flip to any other with no
+// guard at all. 'submitted' is the reopen path.
+const NEXT = {
+  submitted: new Set(["approved", "rejected"]),
+  approved: new Set(["rejected", "submitted"]),
+  rejected: new Set(["approved", "submitted"]),
+  superseded: new Set(),
+};
+
+// THE hours formula, byte-for-byte the same summation as lib/engine.js rollup()
+// and lib/aws/data.js deriveTotals(). `other` (sick/vacation/holiday) is paid
+// time: it counts toward the total but must NOT inflate billable regular.
+function deriveTotals(days) {
+  let regular = 0, overtime = 0, other = 0, daysWorked = 0;
+  for (const d of Array.isArray(days) ? days : []) {
+    const reg = Number(d?.regular) || 0;
+    const ot = Number(d?.overtime) || 0;
+    const oth = Number(d?.other) || 0;
+    regular += reg; overtime += ot; other += oth;
+    if (reg + ot + oth > 0) daysWorked += 1;
+  }
+  const r2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+  return {
+    regular: r2(regular), overtime: r2(overtime), other: r2(other),
+    total: r2(regular + overtime + other), daysWorked,
+  };
+}
+
+const bad = (msg, status = 400, extra = {}) =>
+  NextResponse.json({ error: msg, ...extra }, { status });
 
 export async function POST(request) {
   const user = await currentUser();
-  if (!user) return NextResponse.json({ error: "not authenticated" }, { status: 401 });
-  if (user.role !== "admin") return NextResponse.json({ error: "forbidden" }, { status: 403 });
+  if (!user) return bad("not authenticated", 401);
+  if (user.role !== "admin") return bad("forbidden", 403);
 
-  const { editId, status, note, finals } = await request.json().catch(() => ({}));
-  if (!editId) return NextResponse.json({ error: "editId required" }, { status: 400 });
+  const body = await request.json().catch(() => ({}));
+  const { editId, status, note, days, summaryTotals, confirmZero } = body || {};
+  if (!editId) return bad("editId required");
   if (status && !ALLOWED.has(status)) {
-    return NextResponse.json({ error: `status must be one of ${[...ALLOWED].join(", ")}` }, { status: 400 });
+    return bad(`status must be one of ${[...ALLOWED].join(", ")}`);
   }
 
-  // A superseded submission is history — reviewing it would be meaningless.
-  const target = await queryOne(`select id, status, user_id from public.ts_employee_edits where id=$1`, [editId]);
-  const owner = target;
-  if (!target) return NextResponse.json({ error: "submission not found" }, { status: 404 });
-  if (target.status === "superseded") {
-    return NextResponse.json(
-      { error: "This submission was replaced by a newer one; review that instead." },
-      { status: 409 }
-    );
+  const client = await pool().connect();
+  let row, target, corrected = false, supersededCount = 0;
+  try {
+    await client.query("begin");
+
+    target = (await client.query(
+      `select id, user_id, year, month, status, fields, days
+         from public.ts_employee_edits where id = $1 for update`,
+      [editId]
+    )).rows[0];
+    if (!target) { await client.query("rollback"); return bad("submission not found", 404); }
+
+    // A superseded submission is history — reviewing it would be meaningless.
+    if (target.status === "superseded") {
+      await client.query("rollback");
+      return bad("This submission was replaced by a newer one; review that instead.", 409);
+    }
+    if (status && status !== target.status && !NEXT[target.status]?.has(status)) {
+      await client.query("rollback");
+      return bad(`cannot move a ${target.status} submission to ${status}`, 409);
+    }
+
+    // ---- corrected hours, derived here and nowhere else --------------------
+    // A submission whose day grid is empty but whose stored totals are non-zero
+    // came from a document that only stated SUMMARY figures. Summing its
+    // (empty) days would pay the employee 0 hours, so that case gets its own
+    // explicit, audited input instead of being forced through the summation.
+    const storedTotal = Number(target.fields?.totals?.total) || 0;
+    const storedDaysTotal = deriveTotals(target.days).total;
+    const summaryOnly = storedDaysTotal === 0 && storedTotal > 0;
+
+    let finals = null;
+    if (Array.isArray(days)) {
+      const t = deriveTotals(days);
+      if (t.total === 0 && summaryOnly && confirmZero !== true) {
+        await client.query("rollback");
+        return bad(
+          "This document has no per-day breakdown, so correcting it from an empty " +
+          "day grid would pay 0 hours. Enter the corrected summary totals instead.",
+          409, { summaryOnly: true }
+        );
+      }
+      finals = { regular: t.regular, overtime: t.overtime, total: t.total };
+    } else if (summaryTotals && typeof summaryTotals === "object") {
+      if (!summaryOnly) {
+        await client.query("rollback");
+        return bad("this submission has a day breakdown — correct the days, not a summary total", 409);
+      }
+      const reg = Number(summaryTotals.regular);
+      const ot = Number(summaryTotals.overtime);
+      if (!Number.isFinite(reg) || !Number.isFinite(ot) || reg < 0 || ot < 0) {
+        await client.query("rollback");
+        return bad("corrected regular and overtime must be non-negative numbers");
+      }
+      const r2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+      // `total` is computed, never taken from the client.
+      finals = { regular: r2(reg), overtime: r2(ot), total: r2(reg + ot) };
+    }
+    corrected = finals !== null;
+
+    // ---- the note ----------------------------------------------------------
+    // `coalesce(note, review_note)` used to carry an old REJECTION reason
+    // forward onto a later approval — and the note is a column in the payroll
+    // CSV. An explicit note (including an explicit null) now replaces it, and a
+    // status change always clears a stale one.
+    const noteProvided = Object.prototype.hasOwnProperty.call(body || {}, "note");
+    const statusChanges = !!status && status !== target.status;
+    const overwriteNote = noteProvided || statusChanges;
+
+    row = (await client.query(
+      // Every parameter is cast explicitly: an untyped NULL bind inside a CASE
+      // has no column to infer a type from, and Postgres rejects it outright
+      // ("could not determine data type of parameter").
+      `update public.ts_employee_edits
+          set status         = coalesce($2::text, status),
+              review_note    = case when $3::boolean then $4::text else review_note end,
+              final_regular  = case when $5::boolean then $6::numeric else final_regular  end,
+              final_overtime = case when $5::boolean then $7::numeric else final_overtime end,
+              final_total    = case when $5::boolean then $8::numeric else final_total    end,
+              reviewed_by    = $9::uuid,
+              reviewed_at    = now()
+        where id = $1
+        returning id, user_id, year, month, status, review_note,
+                  final_regular, final_overtime, final_total, reviewed_at`,
+      [editId, status || null, overwriteNote, note ?? null,
+       corrected, finals?.regular ?? null, finals?.overtime ?? null, finals?.total ?? null,
+       user.id]
+    )).rows[0];
+
+    // ---- at most ONE approved row per employee+period -----------------------
+    // The database trigger only supersedes rows still in status 'submitted', so
+    // approving a second row for the same person+month used to leave TWO
+    // approved rows and the payroll export paid both. Approving now retires
+    // every other current row for that period.
+    if (row.status === "approved") {
+      const sup = await client.query(
+        `update public.ts_employee_edits set status = 'superseded'
+          where user_id = $1 and year = $2 and month = $3
+            and id <> $4 and status <> 'superseded'
+          returning id`,
+        [row.user_id, row.year, row.month, row.id]
+      );
+      supersededCount = sup.rowCount || 0;
+    }
+
+    await client.query("commit");
+  } catch (e) {
+    await client.query("rollback").catch(() => {});
+    console.error("[review] failed:", e?.message || e);
+    return bad(e?.message || "couldn't update the review status", 500);
+  } finally {
+    client.release();
   }
 
-  const num = (v) => (v === null || v === undefined || v === "" ? null : Number(v));
-  const hasFinals = finals && typeof finals === "object";
-
-  const row = await queryOne(
-    `update public.ts_employee_edits
-        set status         = coalesce($2, status),
-            review_note    = coalesce($3, review_note),
-            final_regular  = case when $4 then $5 else final_regular  end,
-            final_overtime = case when $4 then $6 else final_overtime end,
-            final_total    = case when $4 then $7 else final_total    end,
-            reviewed_by    = $8,
-            reviewed_at    = now()
-      where id = $1
-      returning id, status, review_note, final_regular, final_overtime, final_total, reviewed_at`,
-    [editId, status || null, note ?? null, !!hasFinals,
-     hasFinals ? num(finals.regular) : null,
-     hasFinals ? num(finals.overtime) : null,
-     hasFinals ? num(finals.total) : null,
-     user.id]
+  console.info(
+    `[review] ${user.email} set ${editId} -> ${row.status}` +
+    `${corrected ? " (totals corrected)" : ""}` +
+    `${supersededCount ? ` (+${supersededCount} superseded)` : ""}`
   );
-
-  console.info(`[review] ${user.email} set ${editId} -> ${row.status}${hasFinals ? " (totals corrected)" : ""}`);
-  await audit({ actor: user, action: "review", subjectId: owner?.user_id ?? null,
-                detail: { editId, status: row.status, corrected: !!hasFinals, note: note ?? null },
-                ip: clientIp(request) });
-  return NextResponse.json({ ok: true, submission: row });
+  await audit({
+    actor: user, action: "review", subjectId: row.user_id ?? null,
+    detail: {
+      editId, status: row.status, corrected,
+      finalTotal: row.final_total, supersededRows: supersededCount, note: note ?? null,
+    },
+    ip: clientIp(request),
+  });
+  return NextResponse.json({ ok: true, submission: row, superseded: supersededCount });
 }

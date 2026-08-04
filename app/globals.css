@@ -18,6 +18,14 @@
   --red-soft: #fee2e2;
   --purple: #7c3aed;
   --purple-soft: #f3e8ff;
+  /* "under a standard 8h day" — a NEUTRAL, informational cue. Deliberately not
+     amber (that is .cell.missing) and not red (that is .cell.flagged), so a
+     short day never reads as an error. One place to retheme. */
+  --short-soft: #f0f9ff;
+  --short-line: #38bdf8;
+  /* required-field marker. NOT --red: "you still have to fill this in" must not
+     look like "what you typed is wrong". */
+  --req: var(--brand);
   --radius: 12px;
   --radius-sm: 8px;
   --shadow: 0 1px 3px rgba(15, 23, 42, 0.08), 0 1px 2px rgba(15, 23, 42, 0.04);
@@ -76,6 +84,26 @@ input, select, textarea {
 input:focus, select:focus, textarea:focus {
   outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft);
 }
+/* Required-field marker (item 10). ONE marker, ONE colour, everywhere. The
+   asterisk is the signal; the colour is only emphasis, and the control also
+   carries aria-required so the cue is not visual-only.
+   The selector matches the SPAN ITSELF rather than only `.field label .req`,
+   because the marker also appears in card titles and inline labels — a rule
+   that matches the element always beats a colour inherited from `.field label`
+   or `.card-title`, whatever their specificity. Components must therefore use
+   `className="req"` and NEVER an inline colour: four hard-coded red copies
+   (questionnaire, admin console, signup) used to contradict this one. */
+.req { color: var(--req); font-weight: 800; margin-left: 3px; }
+.req-note { font-size: 11px; color: var(--muted); margin: -6px 0 12px; }
+/* Only applied AFTER a submit attempt — see showErrors in DashboardClient. */
+.field.invalid input, .field.invalid select, .field.invalid textarea {
+  border-color: var(--red);
+}
+.field.invalid input:focus, .field.invalid select:focus, .field.invalid textarea:focus {
+  border-color: var(--red); box-shadow: 0 0 0 3px var(--red-soft);
+}
+/* the sticky topbar must not cover a field we scroll the user to */
+.field input, .field select, .field textarea, [data-scroll-target] { scroll-margin-top: 90px; }
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
 @media (max-width: 560px) { .grid-2 { grid-template-columns: 1fr; } }
 
@@ -135,14 +163,40 @@ input:focus, select:focus, textarea:focus {
 .cell.weekend { background: var(--surface-2); }
 .cell.holiday { background: var(--purple-soft); border-color: #d8b4fe; }
 .cell.missing { border-color: #fbbf24; background: #fffbeb; }
+/* Item 7 — a weekday that has hours but fewer than a standard 8h day.
+   INFORMATION, NOT A WARNING: no icon, no message, no validation entry, and it
+   never affects whether the timesheet can be submitted. Gated in JS to
+   weekdays-with-hours only, so it can never co-occur with .missing (which
+   requires !filled) and never fights .weekend / .holiday for `background`.
+   Sets no border-color, so .flagged's red border stays visible underneath. */
+.cell.short { background: var(--short-soft); box-shadow: inset 3px 0 0 var(--short-line); }
+.cell.short:hover { box-shadow: inset 3px 0 0 var(--short-line), 0 0 0 3px var(--brand-soft); }
 .cell.flagged { border-color: var(--red); }
 .cell .dom { font-size: 12px; font-weight: 700; }
 .cell .wd { font-size: 9px; color: var(--faint); text-transform: uppercase; }
 .cell .hrs { margin-top: auto; font-size: 13px; font-weight: 600; }
 .cell .hrs .reg { color: var(--brand); }
 .cell .hrs .ot { color: var(--amber); margin-left: 5px; }
+/* paid-but-not-worked time (sick / vacation / holiday pay). It is summed into
+   the monthly total server-side, so it must be VISIBLE on the day. */
+.cell .hrs .oth { color: var(--purple); margin-left: 5px; font-size: 12px; }
 .cell .hol-tag { font-size: 9px; color: var(--purple); font-weight: 600; line-height: 1.1; }
 .cell .dot-flag { position: absolute; top: 6px; right: 7px; width: 7px; height: 7px; border-radius: 50%; background: var(--red); }
+
+/* Bulk weekday fill. Sits directly above the legend + grid so "fill the amber
+   days" is next to the amber days. Neutral surface, NOT amber/red: it is a
+   shortcut, not a problem report. */
+.quickfill {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); padding: 10px 12px; margin-bottom: 10px;
+}
+.quickfill label { font-size: 12px; font-weight: 600; color: var(--muted); }
+/* the global `input { width: 100% }` would otherwise blow the row apart */
+.quickfill input { width: 84px; padding: 6px 8px; font-size: 13px; }
+.quickfill .qf-unit { font-size: 12px; color: var(--muted); margin-left: -2px; }
+.quickfill .qf-msg { font-size: 12px; color: var(--muted); flex: 1 1 100%; }
+@media (min-width: 640px) { .quickfill .qf-msg { flex: 1 1 auto; } }
 
 .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin: 6px 2px 12px; }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
@@ -181,6 +235,48 @@ table.tbl tr:hover td { background: var(--surface-2); }
 .pv-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
 .pv-body { flex: 1 1 auto; overflow: auto; background: #475569; padding: 10px; --z: 1; }
 .pv-body img { width: calc(var(--z) * 100%); max-width: none; display: block; margin: 0 auto 10px; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,.3); }
+
+/* ---------- item 6: the review step's two-pane workspace ----------
+   .preview-side is the review step's wrapper around .pv. It previously had NO
+   rule at all above 900px, so it was an unstyled div that collapsed to exactly
+   its child's height — which made .pv's `position: sticky` have ZERO travel and
+   the document scrolled away the moment the form got long. The sticky belongs
+   on the grid ITEM, whose containing block is the grid area. */
+.preview-side { position: sticky; top: 76px; align-self: start; height: calc(100vh - 96px); }
+.preview-side .pv { position: static; height: 100%; }
+
+/* From 1100px up the review step becomes a real two-pane workspace: the form
+   column scrolls INSIDE its own box, so the page stops growing downward and the
+   document stays put beside it. Gated at 1100 (not 900) because below that the
+   7-column calendar in a half-width column is too cramped to work in a short
+   scroller; 900-1100 keeps the plain sticky preview above, and <=900 falls back
+   to the single column + bottom sheet below. A 13" laptop (1440px wide,
+   ~780px of viewport) lands in the pinned mode with a ~684px form pane. */
+@media (min-width: 1100px) {
+  .split.split-review {
+    /* a touch more room for the calendar than for the document */
+    grid-template-columns: minmax(0, 1.08fr) minmax(0, 0.92fr);
+    align-items: stretch;
+    /* Sticky, so the small amount of page above it (heading + alerts) can still
+       scroll past and the workspace then fills the viewport exactly. */
+    position: sticky;
+    top: 76px;
+    height: calc(100vh - 96px);
+    height: calc(100dvh - 96px);
+  }
+  .split.split-review > .stack {
+    min-height: 0;              /* without this a grid item refuses to shrink */
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    padding: 0 8px 4px 0;       /* keep card borders/shadows off the scrollbar */
+  }
+  .split.split-review > .preview-side {
+    position: static;           /* the pane is the scroller now, not the page */
+    height: 100%;
+    min-height: 0;
+  }
+}
 /* admin submission detail with side-by-side document preview (reuses .pv-bar/.pv-body) */
 .modal.modal-split { width: 96vw; max-width: 1600px; height: 92vh; display: flex; flex-direction: column; }
 .modal.modal-split .modal-cols { flex: 1 1 auto; display: flex; min-height: 0; }
@@ -295,6 +391,12 @@ table.tbl tr:hover td { background: var(--surface-2); }
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
   }
-  /* keep the submit card reachable above the sheet */
-  .preview-sheet ~ * { padding-bottom: 62vh; }
+  /* .pv carries height: calc(100vh - 96px), which overflows a 62vh sheet. */
+  .preview-sheet .pv { height: 100%; border: 0; border-radius: 0; }
+  /* Keep the submit card reachable above the sheet. This was
+     `.preview-sheet ~ *`, a general-SIBLING selector — but .preview-sheet is the
+     LAST child of the review step, so it has no following siblings and the rule
+     matched NOTHING: the fixed sheet buried the Submit card. Scoped to the
+     review step's own .split so the upload step (no sheet) keeps its padding. */
+  .split.split-review { padding-bottom: 62vh; }
 }

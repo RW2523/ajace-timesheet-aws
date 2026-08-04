@@ -23,8 +23,10 @@ export default async function AdminPage() {
   // The full `days` is fetched on demand when a submission is opened.
   // ts_timesheets is NOT fetched at all: it was pulled in full (also carrying
   // `days`) and then never read by AdminClient.
-  const LIST_COLS = "id,user_id,month,year,fields,validation,submitted,created_at," +
-                    "status,reviewed_at,review_note,final_regular,final_overtime,final_total";
+  // `reviewed_by` is here so an approved row can say WHO signed it off next to
+  // the decision, instead of just when.
+  const LIST_COLS = "id,timesheet_id,user_id,month,year,fields,validation,submitted,created_at," +
+                    "status,reviewed_by,reviewed_at,review_note,final_regular,final_overtime,final_total";
   const [{ data: profiles }, { data: edits }, { data: files }, { data: adminEdits }] =
     await Promise.all([
       api.from("ts_profiles").select("*").order("full_name"),
