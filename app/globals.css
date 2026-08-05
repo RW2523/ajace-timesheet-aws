@@ -28,6 +28,11 @@
   --req: var(--brand);
   --radius: 12px;
   --radius-sm: 8px;
+  /* The sticky topbar's real height, so scroll-margin-top can track it instead
+     of guessing. Overridden in the tablet/mobile block, where the bar wraps to
+     two rows and a field scrolled to with the old flat 90px landed underneath
+     it. One place to change if the bar ever grows. */
+  --topbar-h: 60px;
   --shadow: 0 1px 3px rgba(15, 23, 42, 0.08), 0 1px 2px rgba(15, 23, 42, 0.04);
   --shadow-lg: 0 10px 30px rgba(15, 23, 42, 0.12);
 }
@@ -75,14 +80,44 @@ h1, h2, h3, h4 { margin: 0; font-weight: 650; letter-spacing: -0.01em; }
 /* ---------- forms ---------- */
 .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
 .field label { font-size: 12px; font-weight: 600; color: var(--muted); }
-.field .hint { font-size: 11px; color: var(--faint); }
+/* NOT scoped to `.field`: `hint` is also used inside fieldsets and radio cards
+   (TimesheetTargetPicker's "Myself" / "Someone else"), which have no .field
+   ancestor — so the rule matched nothing there and the subtitle rendered at
+   inherited 14px/--txt, i.e. LARGER and darker than the 13px option title it is
+   subordinate to. --muted rather than --faint because these hints carry real
+   content (why an email must be unique, what the employee code does) and
+   --faint is 2.6:1 on --surface. */
+.hint { font-size: 11px; color: var(--muted); }
 input, select, textarea {
   width: 100%; background: var(--surface); border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm); padding: 10px 12px; font-size: 14px; color: var(--txt);
   font-family: inherit; transition: border-color .15s, box-shadow .15s;
 }
+/* `width: 100%` above is for TEXT controls. A checkbox or radio always sits in
+   a flex label row, so 100% became its flex base size and the control stretched
+   to 200-500px, leaving the glyph marooned in the middle of the row with its
+   own sentence jammed against the far edge. `.quickfill input` two hundred
+   lines down is the same hazard patched one site at a time; this is the layer
+   it belongs at. Width only — the padding/border above already render
+   harmlessly on native controls. */
+input[type="checkbox"], input[type="radio"] { width: auto; flex: 0 0 auto; }
 input:focus, select:focus, textarea:focus {
   outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft);
+}
+/* The `:where(...):focus-visible` ring at the foot of this file contributes ZERO
+   specificity from `:where()`, so `outline: none` above beat it and text
+   controls — the most numerous thing in the app — were the one control type
+   with no keyboard focus indicator at all. Same specificity, so it wins. */
+input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--brand); outline-offset: 2px;
+}
+/* A disabled control was pixel-for-pixel identical to a live one, because the
+   author rules above override the UA's disabled styling: the combo box that
+   freezes while the add-a-person panel is open read as a field that had
+   silently stopped accepting keystrokes. --surface-2/--muted is the app's
+   existing "inert" pairing (.chip, .badge.gray). */
+input:disabled, select:disabled, textarea:disabled {
+  background: var(--surface-2); color: var(--muted); cursor: not-allowed;
 }
 /* Required-field marker (item 10). ONE marker, ONE colour, everywhere. The
    asterisk is the signal; the colour is only emphasis, and the control also
@@ -103,7 +138,9 @@ input:focus, select:focus, textarea:focus {
   border-color: var(--red); box-shadow: 0 0 0 3px var(--red-soft);
 }
 /* the sticky topbar must not cover a field we scroll the user to */
-.field input, .field select, .field textarea, [data-scroll-target] { scroll-margin-top: 90px; }
+.field input, .field select, .field textarea, [data-scroll-target] {
+  scroll-margin-top: calc(var(--topbar-h) + 30px);
+}
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
 @media (max-width: 560px) { .grid-2 { grid-template-columns: 1fr; } }
 
@@ -125,22 +162,62 @@ input:focus, select:focus, textarea:focus {
 
 /* ---------- badges / chips ---------- */
 .badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 999px; }
-.badge.green { background: var(--green-soft); color: var(--green); }
-.badge.amber { background: var(--amber-soft); color: var(--amber); }
-.badge.red { background: var(--red-soft); color: var(--red); }
+/* Badge TEXT is deliberately darker than the --green/--amber/--red vars those
+   fills come from: at 11px/600 on the soft fill those vars give 3.0/2.9/4.0:1,
+   and these are the approved / pending / rejected chips an admin reads down a
+   whole table. The three values below are the same ones .alert.ok/.warn/.error
+   already use on the same fills. The vars stay as they are — they are correct
+   for borders, tile values and icons. */
+.badge.green { background: var(--green-soft); color: #166534; }
+.badge.amber { background: var(--amber-soft); color: #92400e; }
+.badge.red { background: var(--red-soft); color: #991b1b; }
 .badge.purple { background: var(--purple-soft); color: var(--purple); }
 .badge.gray { background: var(--surface-2); color: var(--muted); border: 1px solid var(--line); }
 .chip { background: var(--surface-2); border: 1px solid var(--line); color: var(--muted); padding: 4px 10px; border-radius: 999px; font-size: 12px; }
 
-/* ---------- alerts ---------- */
-.alert { border-radius: var(--radius-sm); padding: 12px 14px; font-size: 13px; display: flex; gap: 10px; align-items: flex-start; }
+/* ---------- alerts ----------
+   An alert is a BLOCK. It used to be `display: flex`, and a flex container makes
+   every child a flex ITEM — including each contiguous run of text. A sentence
+   with any inline markup in it ("AI populated this from <b>file.xlsx</b> — …")
+   is therefore three items, not one, and they get dealt into side-by-side
+   columns 10px apart. Almost every alert in the app is prose, so prose is the
+   default and the row layout opts in below; the eight call sites that had each
+   patched this with an inline `display: block` come out with this change.
+
+   The neutral background/border is for an alert carrying NO severity class: the
+   base rule set no background at all, so the employee's proof-of-submission card
+   ("⏳ Submitted — awaiting review") rendered as unboxed text floating on --bg,
+   and an inline `borderColor` had no border-style to paint with.
+
+   overflow-wrap: an alert is where the user's own filename is quoted back at
+   them (lib/aws/filetypes.js), and at 375px an unbreakable filename pushed the
+   whole document sideways. */
+.alert {
+  border-radius: var(--radius-sm); padding: 12px 14px; font-size: 13px;
+  background: var(--surface-2); color: var(--txt);
+  border: 1px solid transparent;
+  overflow-wrap: anywhere;
+}
 .alert.error { background: var(--red-soft); color: #991b1b; }
 .alert.warn { background: var(--amber-soft); color: #92400e; }
 .alert.ok { background: var(--green-soft); color: #166534; }
 .alert.info { background: var(--brand-soft); color: var(--brand-dark); }
+/* Opt-in two-column layout, for an alert that needs a real box beside its text —
+   a trailing auto-margin action, or a leading icon ELEMENT. Everything after the
+   icon has to be wrapped in ONE element or the sentence shatters again. */
+.alert-row { display: flex; gap: 10px; align-items: flex-start; }
+/* Secondary lines inside an alert derive from that alert's own (contrast-tuned)
+   text colour instead of overriding it with a fixed grey that lands under 4.5:1
+   on every one of the four soft fills. */
+.alert .muted { color: inherit; opacity: .8; }
 
 /* ---------- stat tiles ---------- */
 .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+/* Both admin totals rows emit a conditional FIFTH tile when a timesheet carries
+   paid-but-not-worked hours. In the fixed 4-column grid that tile dropped onto a
+   second row beside three empty cells, so a summary read as half-rendered.
+   Gated above the mobile breakpoints so the 2-up phone rule still wins there. */
+@media (min-width: 721px) { .tiles.tiles-5 { grid-template-columns: repeat(5, 1fr); } }
 @media (max-width: 720px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
 .tile { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; }
 .tile .v { font-size: 26px; font-weight: 750; letter-spacing: -0.02em; }
@@ -151,10 +228,15 @@ input:focus, select:focus, textarea:focus {
 
 /* ---------- calendar ---------- */
 .cal { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
-.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+/* minmax(0,…) and min-width:0, not a bare 1fr: `1fr` is minmax(auto,1fr), so a
+   track can never shrink below the cell's min-content width (~62px, set by the
+   day number + weekday row). In any column narrower than 7 of those the grid
+   stopped shrinking and drew its right-hand cells clean outside the .cal card
+   — nothing on the way up to .container clips. */
+.cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
 .cal-head { text-align: center; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); padding: 4px 0; }
 .cell {
-  position: relative; min-height: 74px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  position: relative; min-height: 74px; min-width: 0; border: 1px solid var(--line); border-radius: var(--radius-sm);
   background: var(--surface); padding: 6px 8px; cursor: pointer; display: flex; flex-direction: column; gap: 2px;
   transition: border-color .12s, box-shadow .12s;
 }
@@ -207,10 +289,22 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.tbl th, table.tbl td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); }
 table.tbl th { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); background: var(--surface-2); }
 table.tbl tr:hover td { background: var(--surface-2); }
+/* A wide table scrolls inside its own card, never the page. This was declared in
+   the mobile block only and applied to nothing at all — the class was never used
+   — while the actual scrolling came from an inline `overflow: auto`. It belongs
+   at every width: an admin table is wider than the card on a small laptop too. */
+.tbl-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 
 /* ---------- modal ---------- */
-.modal-bg { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: flex; align-items: center; justify-content: center; z-index: 60; padding: 20px; }
-.modal { background: var(--surface); border-radius: var(--radius); width: 100%; max-width: 460px; box-shadow: var(--shadow-lg); overflow: hidden; }
+/* The BACKDROP is the scroller, and the dialog is centred with auto margins
+   rather than `align-items: center`. A centred flex item overflows its container
+   in BOTH directions, so on a short viewport (a phone in landscape) the top and
+   the bottom of a dialog both went off-screen with no way to reach either — the
+   day editor's Save button, and both buttons on the submitted! card, were simply
+   unreachable. Auto margins still centre a dialog that fits, and pin an
+   over-tall one to the top where it can be scrolled through. */
+.modal-bg { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: flex; align-items: flex-start; justify-content: center; z-index: 60; padding: 20px; overflow-y: auto; overscroll-behavior: contain; }
+.modal { background: var(--surface); border-radius: var(--radius); width: 100%; max-width: 460px; box-shadow: var(--shadow-lg); overflow: hidden; margin: auto; }
 .modal.wide { max-width: 920px; }
 .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--line); }
 .modal-body { padding: 20px; max-height: 80vh; overflow: auto; }
@@ -218,8 +312,26 @@ table.tbl tr:hover td { background: var(--surface-2); }
 
 /* ---------- misc ---------- */
 .muted { color: var(--muted); }
+/* A shell command an admin is told to run ("set-password.sh") was bare default
+   monospace with no box, so it read as an odd-looking fragment of the sentence
+   rather than as something to copy. Translucent slate rather than a fixed
+   colour, so it stays legible on --surface and inside all four alert fills. */
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em;
+  background: rgba(15, 23, 42, .06); padding: 1px 5px; border-radius: 4px;
+}
 .row { display: flex; align-items: center; gap: 12px; }
-.between { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+/* wrap, and a button group that keeps its natural width. Without both, the
+   submission-detail decision row shrank every flex item to min-content instead
+   of wrapping: the explanatory sentence became one word per line and "Save
+   correction & approve" broke across three lines mid-phrase — on the row that
+   signs off payroll. */
+.between { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+/* A .row inside a .between is always the trailing button group. It wraps its
+   own buttons onto a second line rather than letting each of them shrink to
+   min-content — flex only shrinks items once wrapping has run out of room —
+   and stays right-aligned when the whole group drops below the sentence. */
+.between > .row { flex-wrap: wrap; justify-content: flex-end; }
 .stack { display: flex; flex-direction: column; gap: 14px; }
 .spinner { width: 16px; height: 16px; border: 2px solid rgba(255,255,255,.4); border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; display: inline-block; }
 .spinner.dark { border-color: rgba(79,70,229,.25); border-top-color: var(--brand); }
@@ -231,6 +343,13 @@ table.tbl tr:hover td { background: var(--surface-2); }
 .dropzone:hover, .dropzone.drag { border-color: var(--brand); background: var(--brand-soft); }
 .split { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 16px; align-items: start; }
 @media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
+/* The REVIEW step collapses 200px earlier than the upload step does. The pinned
+   two-pane workspace below is gated at 1100px precisely because a 7-column
+   calendar in a half-width column is unworkable under it — but the collapse was
+   still at 900, so 901-1099px left the calendar in a ~350px column where its
+   cells could not fit and were drawn outside the .cal card, over the document
+   pane. Same gate at both ends closes the band. */
+@media (max-width: 1099px) { .split.split-review { grid-template-columns: 1fr; } }
 .pv { position: sticky; top: 76px; height: calc(100vh - 96px); display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
 .pv-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
 .pv-body { flex: 1 1 auto; overflow: auto; background: #475569; padding: 10px; --z: 1; }
@@ -282,8 +401,31 @@ table.tbl tr:hover td { background: var(--surface-2); }
 .modal.modal-split .modal-cols { flex: 1 1 auto; display: flex; min-height: 0; }
 .modal.modal-split .modal-body { flex: 1 1 50%; max-height: none; min-width: 0; border-right: 1px solid var(--line); }
 .docpreview-panel { flex: 1 1 50%; display: flex; flex-direction: column; min-width: 0; background: var(--surface); }
+/* Below 1100px the two panes stack instead of staying at 50/50 — the same width
+   the review step's two-pane workspace is gated at, and for the same reason. At
+   768px a 50% pane is 364px, which gave 37px calendar cells, clipped the fourth
+   stat tile off against .modal's overflow:hidden, and left the document too
+   narrow to read a single figure off. */
+@media (max-width: 1099px) {
+  /* one scroller: the stacked column of panes. .modal itself stays clipped
+     (the phone rule below would otherwise make it a second, nested one). */
+  .modal.modal-split { height: auto; max-height: 92vh; overflow: hidden; }
+  .modal.modal-split .modal-cols { flex-direction: column; overflow-y: auto; }
+  .modal.modal-split .modal-body {
+    flex: 0 0 auto; overflow: visible;
+    border-right: 0; border-bottom: 1px solid var(--line);
+  }
+  .modal.modal-split .docpreview-panel { flex: 0 0 auto; min-height: 45vh; }
+}
 .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 16px; }
-.tab { padding: 9px 14px; font-size: 13px; font-weight: 600; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; }
+/* Rendered as a <button> in the admin console and as an <a href> in the topbar —
+   a tab has to be reachable and activatable from the keyboard. The button chrome
+   is neutralised the same way .cell's is further down. */
+.tab {
+  padding: 9px 14px; font-size: 13px; font-weight: 600; font-family: inherit;
+  color: var(--muted); cursor: pointer; background: none;
+  border: 0; border-bottom: 2px solid transparent;
+}
 .tab.active { color: var(--brand); border-bottom-color: var(--brand); }
 
 /* browser-native document preview (PDF iframe / friendly office-file notice) */
@@ -291,6 +433,20 @@ table.tbl tr:hover td { background: var(--surface-2); }
 .pv-body:has(.pv-frame) { padding: 0; }
 .pv-note { display: flex; flex-direction: column; align-items: center; gap: 8px; color: #e2e8f0; text-align: center; padding: 40px 24px; font-size: 13px; }
 .pv-note b { color: #f8fafc; }
+/* One palette for the dark preview pane. These two were hard-coded per call
+   site at #93c5fd / #fca5a5, which are 4.2:1 and 4.0:1 on .pv-body's #475569 —
+   under AA at the 12-13px they are used at, and the failed-preview link is the
+   only way out of a preview that didn't render. `:not(.btn)` so the ghost
+   buttons that also live in this pane keep their own light chrome. */
+.pv-body a:not(.btn) { color: #bfdbfe; }
+/* A text action inside the pane, rendered as a <button> so it is keyboard
+   operable, wearing the link look it replaced. */
+.pv-body .pv-link {
+  color: #bfdbfe; background: none; border: 0; padding: 0;
+  font: inherit; cursor: pointer; text-decoration: none;
+}
+.pv-body .pv-link:hover { text-decoration: underline; }
+.pv-body .pv-err { color: #fecaca; }
 
 /* submitted! confirmation */
 .success-card { max-width: 520px; padding: 30px 28px; text-align: center; }
@@ -319,26 +475,44 @@ table.tbl tr:hover td { background: var(--surface-2); }
    page scrolled sideways and the calendar, the primary input surface, was
    unusable: a 7-column grid of 74px-min cells inside a 375px viewport.
    ========================================================================== */
-@media (max-width: 720px) {
-  .container { padding: 0 14px; }
-
-  /* header wraps instead of forcing the page wider than the screen */
+/* The topbar has its own breakpoint. 820px is the width at which the desktop bar
+   first lays out on one line — below it the brand, the nav tab, the user name and
+   "Sign out" all wrapped inside a hard 60px box, and iPad portrait (768px) fell
+   squarely in the gap between that and the 720px mobile rules. */
+@media (max-width: 820px) {
   .topbar-inner { height: auto; flex-wrap: wrap; gap: 8px; padding: 10px 0; }
   .topbar-actions { gap: 8px; }
   .brand .sub { display: none; }
   .userchip span:not(.avatar):not(.badge) { display: none; }  /* keep avatar + role */
+}
 
-  /* wide tables scroll inside their own box, never the page */
-  .tbl-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+@media (max-width: 720px) {
+  .container { padding: 0 14px; }
+
   table.tbl { font-size: 12px; }
   table.tbl th, table.tbl td { padding: 8px 9px; white-space: nowrap; }
 
+  /* bottom sheet. `margin: auto 0 0` and not `align-items: flex-end` alone,
+     because the auto margins the desktop rule uses to centre would otherwise
+     beat the alignment and float the sheet in mid-air. */
   .modal-bg { padding: 0; align-items: flex-end; }
-  .modal { max-width: none; border-radius: var(--radius) var(--radius) 0 0; max-height: 92vh; overflow-y: auto; }
+  .modal { max-width: none; border-radius: var(--radius) var(--radius) 0 0; max-height: 92vh; overflow-y: auto; margin: auto 0 0; }
+  /* the sheet is the scroller. .modal-body's own 80vh cap is smaller than the
+     sheet's 92vh, so both boxes used to scroll at once and dragging chained
+     between them — which reads as "the dialog won't scroll". */
+  .modal-body { max-height: none; }
+  /* the submitted! card is the one .tiles in the app that kept four columns on a
+     phone, because its 0,2,0 desktop rule outranks the 0,1,0 mobile one. */
+  .success-card .tiles { grid-template-columns: repeat(2, 1fr); }
   .tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 }
 
 @media (max-width: 560px) {
+  /* The bar wraps to two rows on a phone — measured 99px at 375px against 60px
+     on the desktop the flat old scroll-margin was tuned to, so the field
+     focusFirstProblem() jumped to landed underneath it. */
+  :root { --topbar-h: 100px; }
+
   /* The calendar becomes a vertical day LIST. A 7-across grid at this width
      gives ~40px cells, which cannot show hours or be tapped accurately. */
   .cal-grid { grid-template-columns: 1fr; gap: 4px; }
@@ -362,11 +536,14 @@ table.tbl tr:hover td { background: var(--surface-2); }
 }
 
 /* Visible focus for keyboard users. There was previously no focus styling at
-   all, so tabbing through the app gave no indication of position. */
+   all, so tabbing through the app gave no indication of position.
+   No border-radius here: it is not a focus property, and setting it rewrote the
+   focused element's own corners — .btn, .cell and every input are 8px at rest
+   and snapped to 4px the moment they took keyboard focus. An outline follows the
+   element's own radius anyway. */
 :where(a, button, input, select, textarea, [tabindex]):focus-visible {
   outline: 2px solid var(--brand);
   outline-offset: 2px;
-  border-radius: 4px;
 }
 
 /* .cell is now a <button> (it must be keyboard-operable). Neutralise the
@@ -377,7 +554,10 @@ table.tbl tr:hover td { background: var(--surface-2); }
    on a phone. Stacking it below the form (the old behaviour at <=900px) put the
    document ~2000px away from the hours it is meant to be checked against. */
 .preview-sheet { display: none; }
-@media (max-width: 900px) {
+/* 1099, not 900, and matching the .split.split-review collapse above: the side
+   pane is only worth having next to a form column wide enough to hold the
+   calendar, which is what the 1100px gate on the pinned workspace already says. */
+@media (max-width: 1099px) {
   .preview-side { display: none; }
   .preview-sheet {
     display: block;

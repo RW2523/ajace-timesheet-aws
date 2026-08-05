@@ -42,7 +42,9 @@ export default function ForgotPage() {
               </div>
             ) : (
               // Don't tell people to check an inbox when no sender is configured.
-              <div className="alert">
+              // "warn", deliberately distinct from the green branch above it:
+              // this is the "no link is coming, go find a human" dead end.
+              <div className="alert warn">
                 Reset email isn’t set up on this deployment yet, so no link was sent.
                 Ask your administrator to reset your password.
               </div>

@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import Topbar from "@/components/Topbar";
 import Calendar, { STANDARD_DAY, dayHours } from "@/components/Calendar";
 import DayModal from "@/components/DayModal";
+import useDialogKeys from "@/components/useDialogKeys";
 import Questionnaire from "@/components/Questionnaire";
 import PreviewPane from "@/components/PreviewPane";
 import { createClient } from "@/lib/api/client";
@@ -1016,21 +1017,32 @@ export default function DashboardClient({ profile, submissions = [] }) {
             the document for no reason. */}
         {processing && mode === "review" && (
           <div className="alert info" style={{ marginBottom: 16 }}>
-            <span className="spinner" /> Re-reading <b>{file?.name || "your document"}</b> for{" "}
+            {/* .dark: the default spinner is a white ring sized for a primary
+                button, and on --brand-soft it is all but invisible. */}
+            <span className="spinner dark" /> Re-reading <b>{file?.name || "your document"}</b> for{" "}
             <b>{periodLabel(month, year)}</b>…
           </div>
         )}
 
-        {savedMsg && <div className="alert ok" style={{ marginBottom: 16 }}>{savedMsg}
-          <a style={{ marginLeft: "auto" }} onClick={resetForNew} role="button">Start another</a></div>}
+        {/* alert-row: the one alert in the app that really is two boxes side by
+            side — `margin-left: auto` only pushes the link to the far edge
+            inside a flex container. */}
+        {savedMsg && <div className="alert ok alert-row" style={{ marginBottom: 16 }}>{savedMsg}
+          <a style={{ marginLeft: "auto", cursor: "pointer" }} onClick={resetForNew} role="button"
+             tabIndex={0}
+             onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && resetForNew()}>Start another</a></div>}
 
         {/* Proof of submission. Without this the dashboard is write-only: an
             employee who submits and comes back sees an empty upload screen with
             no sign anything happened — and no confirmation email exists yet. */}
         {currentSubmission && mode === "upload" && !justSubmitted && (
+          /* "info" and not "": submitted-awaiting-review is the state this card
+             spends the whole review window in, and an alert with no modifier
+             used to be the one with no tint — the proof-of-submission card
+             rendered as unboxed text. */
           <div className={"alert " + (currentSubmission.status === "approved" ? "ok"
-                          : currentSubmission.status === "rejected" ? "error" : "")}
-               style={{ marginBottom: 16, display: "block" }}>
+                          : currentSubmission.status === "rejected" ? "error" : "info")}
+               style={{ marginBottom: 16 }}>
             <b>
               {currentSubmission.status === "approved" ? "✓ Approved"
                 : currentSubmission.status === "rejected" ? "✗ Sent back for correction"
@@ -1054,7 +1066,7 @@ export default function DashboardClient({ profile, submissions = [] }) {
             from the SAME `days` array resumeDraft() loads into the calendar, so
             the number on this card is the number you get when you click it. */}
         {mode === "upload" && savedDraft && (
-          <div className="alert info" style={{ marginBottom: 16, display: "block" }}>
+          <div className="alert info" style={{ marginBottom: 16 }}>
             <b>You have an unfinished timesheet for {periodLabel(month, year)}.</b>
             <div style={{ marginTop: 4 }}>
               Saved {whenLabel(savedDraft.draft?.savedAt)} ·{" "}
@@ -1083,7 +1095,7 @@ export default function DashboardClient({ profile, submissions = [] }) {
         {/* Shown in BOTH steps: UploadStep renders processError itself, but a
             failure while submitting from the review step had no render site,
             so a failed submit used to show the user nothing at all. */}
-        {attachWarn && <div className="alert" style={{ marginBottom: 16 }}>{attachWarn}</div>}
+        {attachWarn && <div className="alert warn" style={{ marginBottom: 16 }}>{attachWarn}</div>}
         {processError && mode === "review" && (
           <div className="alert error" style={{ marginBottom: 16 }}>{processError}</div>
         )}
@@ -1168,29 +1180,37 @@ export default function DashboardClient({ profile, submissions = [] }) {
 // same number the server would derive — so what the employee is told they are
 // clearing is exactly what is on the screen.
 function PeriodSwitch({ from, to, willReread, hours, onCancel, onConfirm }) {
+  const dialogRef = useDialogKeys(onCancel);
   return (
     <div className="modal-bg" onClick={onCancel}>
-      <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog"
+      <div className="modal" ref={dialogRef} onClick={(e) => e.stopPropagation()} role="dialog"
            aria-modal="true" aria-label={`Switch from ${from} to ${to}`}>
-        <h2 style={{ margin: "0 0 8px", fontSize: 19 }}>Switch to {to}?</h2>
-        <p className="muted" style={{ margin: "0 0 10px" }}>
-          Hours are recorded per day, so the {from} calendar can’t move to {to}.
-          {hours > 0
-            ? ` The ${hours} hour${hours === 1 ? "" : "s"} currently on the ${from} grid will be cleared.`
-            : " The current grid will be cleared."}
-        </p>
-        <p className="muted" style={{ margin: "0 0 16px" }}>
-          {willReread
-            ? "Your uploaded document will be read again for " + to +
-              " — you don’t need to upload it a second time."
-            : "You’ll get an empty " + to + " calendar to fill in."}{" "}
-          Nothing has been submitted, and {from} keeps whatever you had saved for it.
-        </p>
-        <div className="row" style={{ justifyContent: "flex-end", gap: 10 }}>
-          <button className="btn btn-ghost" onClick={onCancel}>Stay on {from}</button>
-          <button className="btn btn-primary" onClick={onConfirm} autoFocus>
-            {willReread ? `Switch and re-read` : `Switch to ${to}`}
-          </button>
+        {/* .modal itself has no padding — it is only the card. Content must sit
+            inside .modal-head/.modal-body or it renders flush against the card
+            edges and the buttons spill past the bottom corner. */}
+        <div className="modal-head">
+          <h2 style={{ margin: 0, fontSize: 17 }}>Switch to {to}?</h2>
+        </div>
+        <div className="modal-body">
+          <p className="muted" style={{ margin: "0 0 10px" }}>
+            Hours are recorded per day, so the {from} calendar can’t move to {to}.
+            {hours > 0
+              ? ` The ${hours} hour${hours === 1 ? "" : "s"} currently on the ${from} grid will be cleared.`
+              : " The current grid will be cleared."}
+          </p>
+          <p className="muted" style={{ margin: "0 0 18px" }}>
+            {willReread
+              ? "Your uploaded document will be read again for " + to +
+                " — you don’t need to upload it a second time."
+              : "You’ll get an empty " + to + " calendar to fill in."}{" "}
+            Nothing has been submitted, and {from} keeps whatever you had saved for it.
+          </p>
+          <div className="row" style={{ justifyContent: "flex-end", gap: 10 }}>
+            <button className="btn btn-ghost" onClick={onCancel}>Stay on {from}</button>
+            <button className="btn btn-primary" onClick={onConfirm} autoFocus>
+              {willReread ? `Switch and re-read` : `Switch to ${to}`}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -1336,7 +1356,7 @@ function ReviewStep({
           which discards the extraction. Name the cause, and where the extractor
           told us which month the entries really were, offer the switch. */}
       {emptyExtraction && (
-        <div className="alert error" style={{ display: "block" }}
+        <div className="alert error"
              id="ts-empty-extraction" tabIndex={-1}>
           <b>⚠ No hours were found for {periodLabel(month, year)}.</b>
           <div style={{ marginTop: 6 }}>
@@ -1375,7 +1395,7 @@ function ReviewStep({
           only person who can resolve them, so they belong here. */}
       {aiMeta && (aiMeta.issues?.length > 0 || aiMeta.reviewStatus === "blocked" ||
                   aiMeta.reviewStatus === "needs_review") && (
-        <div className="alert" style={{ display: "block", borderColor: "var(--amber)" }}>
+        <div className="alert warn">
           <b>⚠ The AI wasn’t fully sure about this document — please check these:</b>
           <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
             {(aiMeta.issues || []).map((it, i) => (
@@ -1583,9 +1603,11 @@ function ReviewStep({
 
 // ---------------- submitted! ----------------
 function SubmitSuccess({ period, totals, onClose, onNew }) {
+  const dialogRef = useDialogKeys(onClose);
   return (
     <div className="modal-bg" onClick={onClose}>
-      <div className="modal success-card" onClick={(e) => e.stopPropagation()}>
+      <div className="modal success-card" ref={dialogRef} onClick={(e) => e.stopPropagation()}
+           role="dialog" aria-modal="true" aria-label="Timesheet submitted">
         <div className="success-check" aria-hidden>✓</div>
         <h2 style={{ margin: "14px 0 4px" }}>Timesheet submitted!</h2>
         <p className="muted" style={{ margin: 0 }}>

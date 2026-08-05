@@ -1,9 +1,10 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Topbar from "@/components/Topbar";
 import Calendar from "@/components/Calendar";
 import DayModal from "@/components/DayModal";
+import useDialogKeys from "@/components/useDialogKeys";
 import { createClient } from "@/lib/api/client";
 import { periodLabel, defaultPeriod as processingPeriod, MONTHS } from "@/lib/month";
 import { rollup, buildCalendar } from "@/lib/engine";
@@ -354,7 +355,7 @@ export default function AdminClient({ profile, profiles, edits, files, adminEdit
             be two genuine namesakes, so it is a warning. */}
         {duplicatePeople.length > 0 && (
           <div className={`alert ${duplicatePeople.some((d) => d.kind === "code") ? "error" : "warn"}`}
-               style={{ marginBottom: 18, display: "block" }}>
+               style={{ marginBottom: 18 }}>
             <b>Some people may be registered twice.</b>
             <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
               {duplicatePeople.map((d) => (
@@ -427,10 +428,15 @@ export default function AdminClient({ profile, profiles, edits, files, adminEdit
           {[["submissions", "Submissions"], ["employees", "Employees"],
             ...(reviewer ? [["files", "Files"], ["revisions", "Admin revisions"]] : []),
            ].map(([k, tabLabel]) => (
-            <div key={k} className={"tab" + (tab === k ? " active" : "")} onClick={() => setTab(k)}>
+            /* <button>, not <div onClick>: as divs these carried no tabIndex,
+               no role and no key handler, so three of the four admin sections
+               were unreachable without a mouse. The same .tab class is already
+               an <a href> in Topbar. */
+            <button type="button" key={k} aria-current={tab === k ? "page" : undefined}
+                    className={"tab" + (tab === k ? " active" : "")} onClick={() => setTab(k)}>
               {tabLabel}
               {k === "revisions" && pAdminEdits.length > 0 && <span className="badge gray" style={{ marginLeft: 6 }}>{pAdminEdits.length}</span>}
-            </div>
+            </button>
           ))}
         </div>
 
@@ -665,6 +671,19 @@ function AddTimesheetModal({ api, roster, people, adminProfile, initialPeriod, o
   // check and only the server sees the clash — this puts its answer on the panel
   // beside the name field instead of in a generic red banner at the bottom.
   const [sameNameFromServer, setSameNameFromServer] = useState(null);
+  const dialogRef = useDialogKeys(onClose);
+  // Both server verdicts about a new person render inside the picker, which sits
+  // at the TOP of the modal body; the button that triggers them is ~1500px below
+  // it, past the note field, the tiles and a six-row calendar. Without this the
+  // only feedback on a 409 is off-screen and pressing "Add them and file this
+  // timesheet" looks like it did nothing. The scroller is .modal-body, not the
+  // page, so this is scrollIntoView rather than the window-scrolling
+  // focusFirstProblem() the employee dashboard uses.
+  const pickerRef = useRef(null);
+  useEffect(() => {
+    if (!emailErr && !sameNameFromServer) return;
+    pickerRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [emailErr, sameNameFromServer]);
 
   const target = useMemo(
     () => resolveTarget(who, { roster, people, self: adminProfile }),
@@ -816,7 +835,8 @@ function AddTimesheetModal({ api, roster, people, adminProfile, initialPeriod, o
 
   return (
     <div className="modal-bg" onClick={onClose}>
-      <div className="modal wide" onClick={(e) => e.stopPropagation()}>
+      <div className="modal wide" ref={dialogRef} onClick={(e) => e.stopPropagation()}
+           role="dialog" aria-modal="true" aria-label="Add a timesheet">
         <div className="modal-head">
           <div>
             <h3 style={{ fontSize: 16 }}>Add a timesheet</h3>
@@ -829,12 +849,14 @@ function AddTimesheetModal({ api, roster, people, adminProfile, initialPeriod, o
           <button className="x" onClick={onClose} aria-label="Close">×</button>
         </div>
         <div className="modal-body">
-          <TimesheetTargetPicker
-            value={who} onChange={setWho}
-            roster={roster} people={people} self={adminProfile}
-            serverEmailError={emailErr}
-            serverSameName={sameNameFromServer}
-          />
+          <div ref={pickerRef}>
+            <TimesheetTargetPicker
+              value={who} onChange={setWho}
+              roster={roster} people={people} self={adminProfile}
+              serverEmailError={emailErr}
+              serverSameName={sameNameFromServer}
+            />
+          </div>
 
           <div className="grid-2">
             <div className="field">
@@ -889,7 +911,7 @@ function AddTimesheetModal({ api, roster, people, adminProfile, initialPeriod, o
             </div>
           </div>
 
-          <div className="tiles" style={{ margin: "16px 0" }}>
+          <div className={"tiles" + (Number(totals.other) > 0 ? " tiles-5" : "")} style={{ margin: "16px 0" }}>
             <div className="tile reg"><div className="v">{totals.regular}</div><div className="l">Regular</div></div>
             <div className="tile ot"><div className="v">{totals.overtime}</div><div className="l">Overtime</div></div>
             {/* Paid but not worked (holiday pay / PTO / sick). Shown only when
@@ -996,6 +1018,7 @@ function SubmissionDetail({ edit, profile, adminProfile, reviewer, canDecide, so
   const [saved, setSaved] = useState(false);
   const [saveErr, setSaveErr] = useState("");
   const [preview, setPreview] = useState(false);
+  const dialogRef = useDialogKeys(onClose);
   // Some documents only provide SUMMARY totals (weekly rows / a stated month
   // total) with no per-day breakdown -- their day grid is empty, so recomputing
   // from days would wrongly show 0. Fall back to the totals stored at
@@ -1154,7 +1177,10 @@ function SubmissionDetail({ edit, profile, adminProfile, reviewer, canDecide, so
 
   return (
     <div className="modal-bg" onClick={onClose}>
-      <div className={"modal " + (preview && sourceFile ? "modal-split" : "wide")} onClick={(e) => e.stopPropagation()}>
+      <div className={"modal " + (preview && sourceFile ? "modal-split" : "wide")}
+           ref={dialogRef} onClick={(e) => e.stopPropagation()}
+           role="dialog" aria-modal="true"
+           aria-label={`${profile.full_name || edit.fields?.employee_name} · ${periodLabel(edit.month, edit.year)}`}>
         <div className="modal-head">
           <div>
             <h3 style={{ fontSize: 16 }}>{profile.full_name || edit.fields?.employee_name} · {periodLabel(edit.month, edit.year)}</h3>
@@ -1176,7 +1202,7 @@ function SubmissionDetail({ edit, profile, adminProfile, reviewer, canDecide, so
                 {preview ? "Hide document" : "📄 Preview document"}
               </button>
             )}
-            <button className="x" onClick={onClose}>×</button>
+            <button className="x" onClick={onClose} aria-label="Close">×</button>
           </div>
         </div>
         <div className="modal-cols">
@@ -1211,7 +1237,7 @@ function SubmissionDetail({ edit, profile, adminProfile, reviewer, canDecide, so
             </div>
           )}
 
-          <div className="tiles" style={{ marginBottom: 16 }}>
+          <div className={"tiles" + (Number(r.other) > 0 ? " tiles-5" : "")} style={{ marginBottom: 16 }}>
             <div className="tile reg"><div className="v">{r.regular}</div><div className="l">Regular</div></div>
             <div className="tile ot"><div className="v">{r.overtime}</div><div className="l">Overtime</div></div>
             {/* Same reason as the entry preview: this is the screen where the
@@ -1458,9 +1484,12 @@ function DocPreviewPanel({ api, path, fileName, onClose }) {
             </div>
           )}
           {err && (
-            <div style={{ color: "#fca5a5", textAlign: "center", padding: 40, fontSize: 13 }}>
+            /* pv-err / pv-link: the two colours here were hard-coded per call
+               site and both missed AA on this pane's slate. A <button> because
+               this link is the only way out of a preview that didn't render. */
+            <div className="pv-err" style={{ textAlign: "center", padding: 40, fontSize: 13 }}>
               Couldn’t render preview: {err}<br />
-              <a className="src-link" onClick={openOriginal} role="button" style={{ color: "#93c5fd" }}>Open the original ↗</a>
+              <button type="button" className="pv-link" onClick={openOriginal}>Open the original ↗</button>
             </div>
           )}
           {!loading && !err && doc?.kind === "pdf" && (
@@ -1480,7 +1509,7 @@ function DocPreviewPanel({ api, path, fileName, onClose }) {
               <div style={{ fontSize: 26 }}>📊</div>
               <b>No in-browser preview for this file type.</b>
               <span>This format can’t be rendered here — open the original instead.</span>
-              <a className="btn btn-ghost btn-sm" onClick={openOriginal} role="button">Open original ↗</a>
+              <button type="button" className="btn btn-ghost btn-sm" onClick={openOriginal}>Open original ↗</button>
             </div>
           )}
           {!loading && !err && !doc && pages.map((src, i) => <img key={i} src={src} alt={`page ${i + 1}`} />)}
@@ -1502,7 +1531,10 @@ function DownloadBtn({ api, path }) {
 
 function Table({ headers, children }) {
   return (
-    <div className="card" style={{ overflow: "auto" }}>
+    /* tbl-wrap is the class the mobile table treatment (momentum scrolling) was
+       written for; it had never been applied anywhere, and the horizontal scroll
+       was coming from an inline overflow instead. */
+    <div className="card tbl-wrap">
       <table className="tbl">
         <thead><tr>{headers.map((h, i) => <th key={i}>{h}</th>)}</tr></thead>
         <tbody>{children}</tbody>

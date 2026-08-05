@@ -1,5 +1,6 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
+import useDialogKeys from "@/components/useDialogKeys";
 
 // "" / null / a non-numeric value all mean "no hours", never NaN — a NaN would
 // propagate into `days` and land in the append-only edit row.
@@ -21,32 +22,10 @@ export default function DayModal({ day, onSave, onClose }) {
   // visible and removable.
   const [otherHrs, setOtherHrs] = useState(day.other ?? null);
   const [note, setNote] = useState(day.note ?? "");
-  const dialogRef = useRef(null);
-  const restoreFocusTo = useRef(null);
-
   // Escape to close, Tab kept inside the dialog, and focus returned to the day
-  // that opened it. None of this existed: the modal could only be dismissed by
-  // clicking, and Tab wandered into the page behind it.
-  useEffect(() => {
-    restoreFocusTo.current = document.activeElement;
-    function onKeyDown(e) {
-      if (e.key === "Escape") { e.stopPropagation(); onClose(); return; }
-      if (e.key !== "Tab") return;
-      const f = dialogRef.current?.querySelectorAll(
-        'button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])'
-      );
-      if (!f || !f.length) return;
-      const first = f[0], last = f[f.length - 1];
-      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
-    }
-    document.addEventListener("keydown", onKeyDown, true);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown, true);
-      // hand focus back to where the user was, not to the top of the document
-      if (restoreFocusTo.current?.focus) restoreFocusTo.current.focus();
-    };
-  }, [onClose]);
+  // that opened it. Shared with the app's other four dialogs, which had none of
+  // it — see components/useDialogKeys.js.
+  const dialogRef = useDialogKeys(onClose);
 
   function save() {
     const r = num(reg);
@@ -78,7 +57,12 @@ export default function DayModal({ day, onSave, onClose }) {
   });
 
   return (
-    <div className="modal-bg" onClick={onClose}>
+    // stopPropagation: in the admin console this dialog is a DOM child of
+    // another dialog's backdrop, so a click on THIS backdrop closed the day
+    // editor and the panel underneath it — discarding a half-filled timesheet,
+    // or an in-progress correction, with no confirmation. Backdrop-click is the
+    // dismissal gesture the app teaches everywhere else.
+    <div className="modal-bg" onClick={(e) => { e.stopPropagation(); onClose(); }}>
       <div className="modal" ref={dialogRef} role="dialog" aria-modal="true"
            aria-label={`Edit hours for ${pretty}`}
            onClick={(e) => e.stopPropagation()}>

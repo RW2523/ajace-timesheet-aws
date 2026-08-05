@@ -123,8 +123,8 @@ export default function TimesheetTargetPicker({
 
       {isOther && (
         <div className="field" style={{ marginTop: 12, marginBottom: 0 }}>
-          <label>Employee <Req /></label>
-          <input list="ts-admin-roster" value={v.pick} autoComplete="off"
+          <label htmlFor="ts-target-pick">Employee <Req /></label>
+          <input id="ts-target-pick" list="ts-admin-roster" value={v.pick} autoComplete="off"
                  disabled={v.mode === "new"}
                  onChange={(e) => set({ pick: e.target.value })}
                  placeholder="Type a name or email…" />
@@ -148,7 +148,7 @@ export default function TimesheetTargetPicker({
           {/* THE POINT OF THIS COMPONENT. A name that matches nobody used to be a
               dead end with no message at all. */}
           {noMatch && (
-            <div className="alert info" style={{ marginTop: 8, display: "block" }}>
+            <div className="alert info" style={{ marginTop: 8 }}>
               <div style={{ marginBottom: 8 }}>
                 Nobody registered matches <b>“{typed}”</b>.
               </div>
@@ -186,7 +186,9 @@ function NewPersonPanel({ v, set, emailIssue, nameTooShort, codeIssue,
       marginTop: 10, padding: "14px 14px 2px", border: "1px solid var(--line-strong)",
       borderRadius: "var(--radius-sm)", background: "var(--surface-2)",
     }}>
-      <div className="between" style={{ marginBottom: 10 }}>
+      {/* wrap: on a phone the heading and its own escape hatch both wrap to two
+          lines and were jammed together in a 272px row. */}
+      <div className="between" style={{ marginBottom: 10, flexWrap: "wrap" }}>
         <b style={{ fontSize: 13 }}>Add a new person to payroll</b>
         <button type="button" className="btn btn-ghost btn-sm" onClick={onCancel}>
           Cancel — pick an existing person
@@ -195,11 +197,11 @@ function NewPersonPanel({ v, set, emailIssue, nameTooShort, codeIssue,
 
       <div className="grid-2">
         <div className={`field${nameTooShort ? " invalid" : ""}`}>
-          <label>Full name <Req /></label>
+          <label htmlFor="ts-new-name">Full name <Req /></label>
           {/* Changing the name un-answers the namesake question: a tick left over
               from "yes, a different John Smith" must not still be ticked once the
               name says Jane Doe. */}
-          <input value={v.newName} autoComplete="off"
+          <input id="ts-new-name" value={v.newName} autoComplete="off"
                  onChange={(e) => set({ newName: e.target.value, confirmDistinct: false })}
                  placeholder="e.g. Priya Raman" />
           {nameTooShort && (
@@ -209,8 +211,8 @@ function NewPersonPanel({ v, set, emailIssue, nameTooShort, codeIssue,
           )}
         </div>
         <div className={`field${emailIssue ? " invalid" : ""}`}>
-          <label>Email <Req /></label>
-          <input type="email" value={v.newEmail} autoComplete="off"
+          <label htmlFor="ts-new-email">Email <Req /></label>
+          <input id="ts-new-email" type="email" value={v.newEmail} autoComplete="off"
                  onChange={(e) => set({ newEmail: e.target.value })}
                  placeholder="e.g. priya.raman@example.com" />
           {emailIssue
@@ -222,9 +224,12 @@ function NewPersonPanel({ v, set, emailIssue, nameTooShort, codeIssue,
                 is a wrong payslip.
               </div>}
         </div>
-        <div className={`field${codeIssue ? " invalid" : ""}`}>
-          <label>Employee code</label>
-          <input value={v.newCode || ""} autoComplete="off"
+        {/* Full width: three fields in a two-column grid put this one alone on
+            row two, under a 70px hole left by the Email hint's height. Its own
+            hint wants the width anyway. */}
+        <div className={`field${codeIssue ? " invalid" : ""}`} style={{ gridColumn: "1 / -1" }}>
+          <label htmlFor="ts-new-code">Employee code</label>
+          <input id="ts-new-code" value={v.newCode || ""} autoComplete="off"
                  onChange={(e) => set({ newCode: e.target.value })}
                  placeholder="optional — e.g. EC-0194" />
           {codeIssue
@@ -247,7 +252,7 @@ function NewPersonPanel({ v, set, emailIssue, nameTooShort, codeIssue,
           existing people are shown with the addresses that tell them apart, and
           the answer is recorded against the admin who gave it. */}
       {clashes.length > 0 && (
-        <div className="alert warn" style={{ display: "block", marginBottom: 12 }}>
+        <div className="alert warn" style={{ marginBottom: 12 }}>
           <b>
             {clashes.length === 1
               ? "Somebody of this name is already registered."
@@ -267,7 +272,12 @@ function NewPersonPanel({ v, set, emailIssue, nameTooShort, codeIssue,
             for one person is two payslips for one person. Only tick this if it really
             is a different human who happens to share the name.
           </div>
-          <label className="row" style={{ gap: 8, alignItems: "flex-start", fontSize: 13 }}>
+          {/* color/fontWeight: this bare <label> sits inside the outer .field, so
+              `.field label` painted the one line the admin has to read and act
+              on in slate-blue 600 — a different colour family from the amber
+              alert it lives in, and it made its <b> compute to 900. */}
+          <label className="row" style={{ gap: 8, alignItems: "flex-start", fontSize: 13,
+                                          color: "inherit", fontWeight: 400 }}>
             <input type="checkbox" checked={!!v.confirmDistinct}
                    onChange={(e) => set({ confirmDistinct: e.target.checked })} />
             <span>
@@ -283,7 +293,7 @@ function NewPersonPanel({ v, set, emailIssue, nameTooShort, codeIssue,
       {/* An admin who thinks they have just created a LOGIN will file a support
           ticket the moment this person can't sign in. Say it before they submit,
           not after. */}
-      <div className="alert warn" style={{ display: "block", marginBottom: 12 }}>
+      <div className="alert warn" style={{ marginBottom: 12 }}>
         <b>This does not create a working login.</b>
         <div style={{ marginTop: 4 }}>
           {clean(v.newName) || "This person"} gets a payroll record only. No password is
