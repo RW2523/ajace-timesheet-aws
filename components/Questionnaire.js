@@ -350,13 +350,15 @@ export default function Questionnaire({
         <div className="card card-pad">
           <h3 className="card-title">US holidays this month — did you work?</h3>
           <p className="muted" style={{ marginTop: -6, marginBottom: 12, fontSize: 13 }}>
-            {/* Say exactly what the buttons do. The old wording — "Not worked
-                (which clears that day's hours)" — was wrong twice over: nothing
-                was cleared at all, and holiday/PTO pay is never cleared. */}
+            {/* Say exactly what the buttons do, including the part people lose
+                money on. AJACE does not pay a federal holiday that was not
+                worked (operator decision, 2026-08-05), so "Not worked" empties
+                the day completely — the holiday pay goes with the hours. Saying
+                only "removes those hours" would hide the pay change. */}
             These US federal holidays fall in this period. Mark each one{" "}
-            <b>Worked</b> (then enter the hours you worked) or <b>Not worked</b>{" "}
-            (which removes those hours). Holiday or PTO pay on the day is always
-            kept either way.
+            <b>Worked</b> (then enter the hours you worked) or <b>Not worked</b>,
+            which empties the day — the hours <i>and</i> any holiday or PTO pay
+            on it. Pressing <b>Worked</b> again puts back what the document said.
           </p>
           <div className="stack" style={{ gap: 8 }}>
             {holidayList.map(([date, name]) => {
@@ -379,7 +381,7 @@ export default function Questionnaire({
                       <div className="muted" style={{ fontSize: 12 }}>
                         {d.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}
                         {worked && ` · ${hrs}h worked in calendar`}
-                        {!worked && paid > 0 && ` · ${paid}h holiday/PTO pay kept`}
+                        {!worked && paid > 0 && ` · ${paid}h holiday/PTO pay — cleared if you mark this Not worked`}
                       </div>
                     </div>
                     <div className="row" style={{ gap: 6 }}>

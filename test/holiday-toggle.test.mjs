@@ -73,26 +73,47 @@ test("Not worked drops overtime too, not just regular", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 2. ...but it must NOT delete holiday pay. `other` is paid-but-not-worked
-//    time, and app/api/admin/export pays total = regular + overtime + other.
-//    Clearing it would cut 8h off the cheque of everyone who honestly said they
-//    did not work a federal holiday.
+// 2. ...AND it removes the holiday pay with them.
+//
+//    OPERATOR DECISION, 2026-08-05: "not worked should remove the holiday pay".
+//    These tests previously asserted the opposite — that `other` survived — on
+//    the reasoning that "I didn't work it" is not "don't pay me for it". That
+//    was a defensible default but it was a policy call about what people are
+//    paid, and the operator has now made it: AJACE does not pay a holiday that
+//    was not worked. app/api/admin/export pays total = regular + overtime +
+//    other, so leaving `other` behind would have paid it.
 // ---------------------------------------------------------------------------
-test("Not worked KEEPS holiday pay — the cheque does not shrink", () => {
+test("Not worked removes the holiday pay too — the day is not paid at all", () => {
   const before = [holiday({ regular: 8, other: 8, total: 16, filled: true })];
   const after = applyToDate(before, JUL4, clearWorkedHours);
   const t = deriveTotals(after);
   assert.equal(t.regular, 0, "the 8h of work is gone");
-  assert.equal(t.other, 8, "the 8h of holiday pay is NOT gone");
-  assert.equal(t.total, 8);
-  assert.equal(t.daysWorked, 1, "still a paid day");
-  assert.equal(after[0].filled, true, "so the day does not render as empty");
+  assert.equal(t.other, 0, "the 8h of holiday pay is gone as well");
+  assert.equal(t.total, 0, "nothing is paid for a holiday that was not worked");
+  assert.equal(t.daysWorked, 0, "and it is not counted as a day worked");
+  assert.equal(after[0].filled, false, "the day renders as empty, because it is");
 });
 
-test("a holiday with ONLY holiday pay is untouched by Not worked", () => {
+test("a holiday carrying ONLY holiday pay is emptied by Not worked", () => {
   const before = [holiday({ other: 8, total: 8, filled: true })];
   const t = deriveTotals(applyToDate(before, JUL4, clearWorkedHours));
-  assert.equal(t.total, 8);
+  assert.equal(t.total, 0, "the holiday pay goes; there is nothing else on the day");
+  assert.equal(t.other, 0);
+});
+
+test("Worked restores the holiday pay a mis-click removed", () => {
+  // Undo has to be a real undo. `other` is read from the BASELINE, not from the
+  // cleared day, or the restore would find null and the mis-click would cost
+  // the employee the paid-not-worked hours permanently.
+  const baseline = holiday({ regular: 8, other: 2, total: 10, filled: true });
+  const cleared = applyToDate([{ ...baseline }], JUL4, clearWorkedHours);
+  assert.equal(deriveTotals(cleared).total, 0, "precondition: the day is empty");
+
+  const back = applyToDate(cleared, JUL4, (c) => restoreWorkedHours(c, baseline));
+  const t = deriveTotals(back);
+  assert.equal(t.regular, 8, "the worked hours come back");
+  assert.equal(t.other, 2, "and so does the paid-not-worked time");
+  assert.equal(t.total, 10, "a full round trip returns the original day");
 });
 
 // ---------------------------------------------------------------------------
