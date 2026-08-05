@@ -11,6 +11,10 @@ import { clientIp } from "@/lib/aws/ratelimit";
 import {
   deriveTotals, deriveTotalsStrict, checkSummaryTotals, HoursRangeError, round2,
 } from "@/lib/hours";
+// WHO may review, and WHOSE row they may review. The second half is not a
+// detail of this route — it is the same maker/checker rule that keeps HR out of
+// the approval seat, so it lives beside it in lib/aws/roles.js.
+import { canReview, isSelfReview, SELF_REVIEW_REFUSAL } from "@/lib/aws/roles";
 
 export const runtime = "nodejs";
 
@@ -60,7 +64,7 @@ const bad = (msg, status = 400, extra = {}) =>
 export async function POST(request) {
   const user = await currentUser();
   if (!user) return bad("not authenticated", 401);
-  if (user.role !== "admin") return bad("forbidden", 403);
+  if (!canReview(user)) return bad("forbidden", 403);
 
   const body = await request.json().catch(() => ({}));
   const { editId, status, note, days, summaryTotals, confirmZero } = body || {};
@@ -80,6 +84,36 @@ export async function POST(request) {
       [editId]
     )).rows[0];
     if (!target) { await client.query("rollback"); return bad("submission not found", 404); }
+
+    // ---- NOBODY SIGNS OFF THEIR OWN WAGES ---------------------------------
+    // Checked HERE, on the row that was just locked, against the session's own
+    // id — not against anything the caller sent. This is the whole control: the
+    // console hides the buttons for your own row, but hiding a button has never
+    // stopped a curl.
+    //
+    // It covers every branch below, deliberately: approve, reject, reopen AND
+    // the totals correction. A correction writes final_total, which IS the paid
+    // number, so "I may not approve my own row but I may set what it pays" would
+    // be the same hole with an extra step.
+    //
+    // The attempt is audited whether or not it was innocent. A privileged user
+    // reaching for their own payroll row is precisely the event an auditor wants
+    // to find, and audit() writes on its own pooled connection and never throws.
+    if (isSelfReview(user, target.user_id)) {
+      await client.query("rollback");
+      console.warn(
+        `[review] REFUSED: ${user.email} tried to review their OWN submission ${editId}` +
+        `${status ? ` (-> ${status})` : ""}${Array.isArray(days) || summaryTotals ? " with a correction" : ""}`
+      );
+      await audit({
+        actor: user, action: "review.refused_self", subjectId: user.id,
+        detail: { editId, attemptedStatus: status ?? null,
+                  attemptedCorrection: Array.isArray(days) || !!summaryTotals,
+                  year: target.year, month: target.month, currentStatus: target.status },
+        ip: clientIp(request),
+      });
+      return bad(SELF_REVIEW_REFUSAL, 403, { selfReview: true });
+    }
 
     // A superseded submission is history — reviewing it would be meaningless.
     if (target.status === "superseded") {
@@ -123,7 +157,13 @@ export async function POST(request) {
       }
       // The grid is kept with the totals it produced, so the row can always show
       // its own arithmetic and the next correction starts from these hours.
-      finals = { regular: t.regular, overtime: t.overtime, total: t.total, days };
+      //
+      // `other` (holiday pay / PTO / sick) is carried across with the other two.
+      // It has always been PART OF t.total — deriveTotals sums regular + overtime
+      // + other — but it used to be dropped here, so a corrected row asserted a
+      // total its own breakdown could not account for and the payroll CSV printed
+      // the difference nowhere.
+      finals = { regular: t.regular, overtime: t.overtime, other: t.other, total: t.total, days };
     } else if (summaryTotals && typeof summaryTotals === "object") {
       if (!summaryOnly) {
         await client.query("rollback");
@@ -142,7 +182,13 @@ export async function POST(request) {
       // deliberate and is WRITTEN, not skipped: this document genuinely has no
       // day breakdown, and a grid left behind by an earlier correction would
       // leave the row claiming evidence that no longer adds up to what it pays.
-      finals = { regular: round2(reg), overtime: round2(ot), total: round2(reg + ot), days: null };
+      // `other: 0` is WRITTEN, not left null. A summary-only document states two
+      // figures and this total is the sum of exactly those two, so the paid-but-
+      // not-worked bucket is genuinely empty — and saying so explicitly stops a
+      // previous grid correction's final_other lingering beside a total that no
+      // longer contains it.
+      finals = { regular: round2(reg), overtime: round2(ot), other: 0,
+                 total: round2(reg + ot), days: null };
     }
     corrected = finals !== null;
 
@@ -164,23 +210,31 @@ export async function POST(request) {
               review_note    = case when $3::boolean then $4::text else review_note end,
               final_regular  = case when $5::boolean then $6::numeric else final_regular  end,
               final_overtime = case when $5::boolean then $7::numeric else final_overtime end,
+              -- PAID BUT NOT WORKED, and part of final_total. In the SAME case as
+              -- the rest: if this were set on its own branch a correction could
+              -- leave the total and its breakdown describing different hours.
+              final_other    = case when $5::boolean then $11::numeric else final_other   end,
               final_total    = case when $5::boolean then $8::numeric else final_total    end,
               -- Written in the SAME case as the totals above, off the SAME
               -- derived object, so the paid number and the grid it was summed
-              -- from can never drift apart: a correction sets all four, or it
+              -- from can never drift apart: a correction sets all five, or it
               -- touches none of them.
               final_days     = case when $5::boolean then $10::jsonb   else final_days   end,
               reviewed_by    = $9::uuid,
               reviewed_at    = now()
         where id = $1
         returning id, user_id, year, month, status, review_note,
-                  final_regular, final_overtime, final_total, reviewed_at`,
+                  final_regular, final_overtime, final_other, final_total, reviewed_at`,
       [editId, status || null, overwriteNote, note ?? null,
        corrected, finals?.regular ?? null, finals?.overtime ?? null, finals?.total ?? null,
        user.id,
        // node-pg encodes a top-level JS array as a Postgres array literal, which
        // jsonb rejects — the grid must be stringified (same rule as data.js).
-       finals?.days ? JSON.stringify(finals.days) : null]
+       finals?.days ? JSON.stringify(finals.days) : null,
+       // $11 — final_other. `?? null` and not `|| null`: a genuine 0 is the
+       // answer for a month with no PTO in it, and turning it into NULL would
+       // send the export back to guessing the residual.
+       finals ? (finals.other ?? 0) : null]
     )).rows[0];
 
     // ---- at most ONE approved row per employee+period -----------------------

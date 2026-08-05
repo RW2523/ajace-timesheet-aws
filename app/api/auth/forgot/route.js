@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import crypto from "crypto";
 import { query, queryOne } from "@/lib/aws/db";
 import { sendPasswordReset, emailEnabled } from "@/lib/aws/email";
+import { isUnusablePassword } from "@/lib/aws/people";
 
 export const runtime = "nodejs";
 
@@ -13,7 +14,28 @@ export async function POST(request) {
   const { email } = await request.json().catch(() => ({}));
   const canEmail = emailEnabled();
 
-  const u = await queryOne(`select id, email from public.auth_users where lower(email)=lower($1)`, [email || ""]);
+  const u = await queryOne(
+    `select id, email, password_hash from public.auth_users where lower(email)=lower($1)`,
+    [email || ""]
+  );
+  // A payroll-only record (added by admin/HR so hours could be filed) has an
+  // unusable password marker, not a hash. "Forgot password" MUST NOT be able to
+  // turn one into a working login: nobody has verified that the person holding
+  // that mailbox is the person on the payroll record, so issuing a token would
+  // make control of an inbox sufficient to obtain an account on the payroll
+  // system — and the address was typed by whoever added them, in a hurry.
+  //
+  // Refusing HERE as well as in /api/auth/reset is the point: reset consumes a
+  // token, so if one is never minted the second gate is never even reached. No
+  // reset_token is written, so the row is untouched.
+  //
+  // Activation stays a deliberate operator act: deploy/scripts/set-password.sh.
+  // The response is the same {ok:true} everyone else gets — this branch must not
+  // become an oracle for "which addresses are registered but dormant".
+  if (u && isUnusablePassword(u.password_hash)) {
+    console.warn(`[auth] reset refused: ${u.email} is a payroll-only record with no password set`);
+    return NextResponse.json({ ok: true, emailConfigured: canEmail });
+  }
   if (u) {
     const token = crypto.randomBytes(32).toString("hex");
     await query(

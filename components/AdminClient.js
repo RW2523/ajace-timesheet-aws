@@ -7,6 +7,12 @@ import DayModal from "@/components/DayModal";
 import { createClient } from "@/lib/api/client";
 import { periodLabel, defaultPeriod as processingPeriod, MONTHS } from "@/lib/month";
 import { rollup, buildCalendar } from "@/lib/engine";
+import TimesheetTargetPicker, { Req } from "@/components/TimesheetTargetPicker";
+import { EMPTY_PICK, resolveTarget, targetKey } from "@/lib/roster";
+// The SAME predicates the server enforces with (lib/aws/roles.js is pure, so it
+// bundles into a client component untouched). Re-typing `role === "admin"` here
+// is how a screen ends up disagreeing with the route it posts to.
+import { canFileForOthers, canReview, canExport } from "@/lib/aws/roles";
 
 // ---------------------------------------------------------------------------
 // ONE VOCABULARY, ONE SOURCE FOR EVERY NUMBER ON THIS SCREEN.
@@ -63,6 +69,17 @@ export default function AdminClient({ profile, profiles, edits, files, adminEdit
   const [detail, setDetail] = useState(null);
   const [bucket, setBucket] = useState("all");
   const [adding, setAdding] = useState(false);
+  // Filing in someone else's name — and adding a person — is privileged, so the
+  // trigger is not shown to anyone who would be refused. The page guard and the
+  // server route are the gates that MATTER; this only keeps the button honest.
+  const canFile = canFileForOthers(profile);
+  // ...and the ones an HR user must NOT be offered. Every one of these is
+  // enforced server-side too (/api/admin/review, /api/admin/export and
+  // /api/storage/get all test for admin themselves) — the point of testing it
+  // again here is that a button which always answers "forbidden" is worse than
+  // no button: it reads as a broken payroll console rather than as a boundary.
+  const reviewer = canReview(profile);
+  const exporter = canExport(profile);
 
   // Only active, non-admin people are expected to file a timesheet. Deactivated
   // leavers used to sit on the month-end chase list forever.
@@ -191,6 +208,45 @@ export default function AdminClient({ profile, profiles, edits, files, adminEdit
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [edits, period, pmap]);
 
+  // ---- people this console cannot tell apart -------------------------------
+  // The chase list rendered `full_name` and nothing else, so three payroll
+  // records for one person showed as three identical grey badges reading
+  // "Nora New" — the console made the duplicate HARDER to spot than the raw
+  // table would have. Two things follow from that, both here:
+  //
+  //   duplicateIdentity(p) — true when this person's name (or employee code) is
+  //     shared with somebody else, so every list that shows a name can show the
+  //     address that distinguishes them instead of three of the same word;
+  //   duplicatePeople      — the warning card, because a shared employee_code
+  //     will make the payroll export REFUSE and the operator should learn that
+  //     here, in the console, not from a failed export on payroll day.
+  const dupNames = useMemo(() => {
+    const byName = {}, byCode = {};
+    profiles.forEach((p) => {
+      const n = String(p.full_name || "").trim().toLowerCase().replace(/\s+/g, " ");
+      const c = String(p.employee_code || "").trim().toLowerCase().replace(/\s+/g, " ");
+      if (n) (byName[n] = byName[n] || []).push(p);
+      if (c) (byCode[c] = byCode[c] || []).push(p);
+    });
+    return { byName, byCode };
+  }, [profiles]);
+  const duplicateIdentity = (p) => {
+    const n = String(p?.full_name || "").trim().toLowerCase().replace(/\s+/g, " ");
+    const c = String(p?.employee_code || "").trim().toLowerCase().replace(/\s+/g, " ");
+    return (n && (dupNames.byName[n]?.length || 0) > 1) ||
+           (c && (dupNames.byCode[c]?.length || 0) > 1);
+  };
+  const duplicatePeople = useMemo(() => {
+    const out = [];
+    Object.entries(dupNames.byCode).forEach(([code, ps]) => {
+      if (ps.length > 1) out.push({ kind: "code", what: ps[0].employee_code || code, people: ps });
+    });
+    Object.entries(dupNames.byName).forEach(([, ps]) => {
+      if (ps.length > 1) out.push({ kind: "name", what: ps[0].full_name, people: ps });
+    });
+    return out;
+  }, [dupNames]);
+
   const BUCKETS = [
     ["all", "All", rows.length, "gray"],
     ["submitted", "Awaiting review", byStatus.submitted.length, "amber"],
@@ -216,13 +272,26 @@ export default function AdminClient({ profile, profiles, edits, files, adminEdit
       <div className="container" style={{ padding: "22px 24px 60px" }}>
         <div className="between" style={{ flexWrap: "wrap", gap: 12, marginBottom: 6 }}>
           <div>
-            <h1 style={{ fontSize: 22, marginBottom: 4 }}>Admin console</h1>
-            <p className="muted">Review employee submissions, audit edits, and make corrections.</p>
+            {/* Name the screen for the job the reader is actually allowed to do
+                on it. "Review submissions and make corrections" is a list of
+                things an HR user will be refused, and a payroll console that
+                describes powers you do not have is how somebody concludes the
+                system is broken and works around it. */}
+            <h1 style={{ fontSize: 22, marginBottom: 4 }}>
+              {reviewer ? "Admin console" : "Payroll console"}
+            </h1>
+            <p className="muted">
+              {reviewer
+                ? "Review employee submissions, audit edits, and make corrections."
+                : "File timesheets on behalf of staff and register new people. Approving, correcting and payroll export are an admin's."}
+            </p>
           </div>
           <div className="row" style={{ gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
-            <button className="btn btn-primary btn-sm" onClick={() => setAdding(true)}>
-              + Add timesheet for an employee
-            </button>
+            {canFile && (
+              <button className="btn btn-primary btn-sm" onClick={() => setAdding(true)}>
+                + Add a timesheet
+              </button>
+            )}
             {periods.length > 0 && (
               <div className="field" style={{ margin: 0, minWidth: 190 }}>
                 <label>Month</label>
@@ -276,6 +345,33 @@ export default function AdminClient({ profile, profiles, edits, files, adminEdit
           </div>
         )}
 
+        {/* TWO RECORDS THAT MIGHT BE ONE PERSON.
+            The alert above catches one ACCOUNT approved twice. This catches the
+            other shape of the same mistake — one HUMAN holding two accounts —
+            which that check is blind to because each account has exactly one
+            approved row. A shared employee code additionally makes the export
+            refuse (payroll matches on it), so it is an error; a shared name may
+            be two genuine namesakes, so it is a warning. */}
+        {duplicatePeople.length > 0 && (
+          <div className={`alert ${duplicatePeople.some((d) => d.kind === "code") ? "error" : "warn"}`}
+               style={{ marginBottom: 18, display: "block" }}>
+            <b>Some people may be registered twice.</b>
+            <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+              {duplicatePeople.map((d) => (
+                <li key={`${d.kind}:${d.what}`} style={{ fontSize: 13 }}>
+                  {d.kind === "code"
+                    ? <>Employee code <b>{d.what}</b> is held by {d.people.length} records — payroll
+                        matches people on that code, so <b>the export will refuse this period</b> until
+                        each of them has their own: </>
+                    : <>{d.people.length} records are named <b>{d.what}</b> — if they are the same
+                        person, that is two payslips: </>}
+                  {d.people.map((p) => p.email).join(", ")}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {/* Month-end chase list: who still owes you a timesheet. */}
         {period !== "all" && notSubmitted.length > 0 && (
           <div className="card card-pad" style={{ marginBottom: 20 }}>
@@ -292,14 +388,23 @@ export default function AdminClient({ profile, profiles, edits, files, adminEdit
                 <a key={p.id} href={`mailto:${p.email}?subject=${encodeURIComponent("Timesheet reminder")}`}
                    className="badge gray" style={{ textDecoration: "none" }}
                    title={`Email ${p.email}`}>
+                  {/* A name shared with somebody else is not a label, it is a
+                      riddle: this list showed three badges all reading "Nora
+                      New". When the name doesn't identify the person, the
+                      address that does goes on the badge. */}
                   {p.full_name || p.email}
+                  {p.full_name && duplicateIdentity(p) && (
+                    <span style={{ opacity: 0.7 }}> · {p.email}</span>
+                  )}
                 </a>
               ))}
             </div>
           </div>
         )}
 
-        {period !== "all" && (
+        {/* Export is admin-only by a decision written down in lib/aws/roles.js:
+            the CSV is the bulk-PII egress path for the whole company. */}
+        {period !== "all" && exporter && (
           <div className="row" style={{ gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
             <a className="btn btn-primary btn-sm"
                href={`/api/admin/export?year=${period.split("-")[0]}&month=${period.split("-")[1]}`}>
@@ -312,8 +417,16 @@ export default function AdminClient({ profile, profiles, edits, files, adminEdit
           </div>
         )}
 
+        {/* Files (the stored source documents) and Admin revisions (the
+            correction trail) are reviewer-only, and not just visually:
+            app/admin/page.js does not fetch either one for a non-reviewer, and
+            lib/aws/data.js would refuse ts_admin_edits anyway. Rendering the
+            tabs would show HR two permanently empty tables that look like
+            "no documents exist" rather than "not yours to see". */}
         <div className="tabs">
-          {[["submissions", "Submissions"], ["employees", "Employees"], ["files", "Files"], ["revisions", "Admin revisions"]].map(([k, tabLabel]) => (
+          {[["submissions", "Submissions"], ["employees", "Employees"],
+            ...(reviewer ? [["files", "Files"], ["revisions", "Admin revisions"]] : []),
+           ].map(([k, tabLabel]) => (
             <div key={k} className={"tab" + (tab === k ? " active" : "")} onClick={() => setTab(k)}>
               {tabLabel}
               {k === "revisions" && pAdminEdits.length > 0 && <span className="badge gray" style={{ marginLeft: 6 }}>{pAdminEdits.length}</span>}
@@ -401,8 +514,11 @@ export default function AdminClient({ profile, profiles, edits, files, adminEdit
                   </td>
                   <td className="muted" style={{ fontSize: 12 }}>{fmt(e.created_at)}</td>
                   <td>
+                    {/* The word on the button is a promise about what opens.
+                        An HR user gets the read-only panel, so it must not say
+                        "Review" — that is the one thing they cannot do here. */}
                     <button className="btn btn-ghost btn-sm" onClick={() => setDetail(e)}>
-                      {isReplaced ? "View" : "Review"}
+                      {isReplaced || !reviewer ? "View" : "Review"}
                     </button>
                   </td>
                 </tr>
@@ -418,7 +534,13 @@ export default function AdminClient({ profile, profiles, edits, files, adminEdit
               <tr key={p.id}>
                 <td><b>{p.full_name || "—"}</b></td>
                 <td>{p.email}</td>
-                <td>{p.role === "admin" ? <span className="badge purple">admin</span> : <span className="badge gray">employee</span>}</td>
+                {/* Spell the role the person actually has. The old ternary
+                    printed "employee" for anything that wasn't "admin", so an
+                    HR user — who can file timesheets in other people's names —
+                    was listed here as an ordinary employee. */}
+                <td>{p.role === "admin" ? <span className="badge purple">admin</span>
+                   : p.role === "hr" ? <span className="badge amber">HR</span>
+                   : <span className="badge gray">employee</span>}</td>
                 <td>{p.active === false ? <span className="badge red">deactivated</span> : <span className="badge green">active</span>}</td>
                 <td>{p.employer || "—"}</td>
                 <td>{p.client || "—"}</td>
@@ -469,9 +591,9 @@ export default function AdminClient({ profile, profiles, edits, files, adminEdit
         )}
       </div>
 
-      {adding && (
+      {adding && canFile && (
         <AddTimesheetModal
-          api={api} roster={roster} adminProfile={profile}
+          api={api} roster={roster} people={profiles} adminProfile={profile}
           initialPeriod={selected}
           onClose={() => setAdding(false)}
           onSaved={() => { setAdding(false); setPickedPeriod(true); router.refresh(); }}
@@ -482,6 +604,10 @@ export default function AdminClient({ profile, profiles, edits, files, adminEdit
         <SubmissionDetail
           edit={detail} profile={pmap[detail.user_id] || {}} adminProfile={profile}
           reviewer={pmap[detail.reviewed_by] || null}
+          /* WHO reviewed it (above) vs MAY I review it (below) — two different
+             questions that were one word apart, so the second one is named for
+             the decision it gates. */
+          canDecide={reviewer}
           sourceFile={files.find((f) => f.user_id === detail.user_id
             && f.month === detail.month && f.year === detail.year)}
           api={api} onClose={() => setDetail(null)}
@@ -505,18 +631,24 @@ function AiDot({ verdict }) {
 }
 
 // ---------------------------------------------------------------------------
-// ITEM 1 — an admin files a timesheet FOR another employee.
+// ITEM 1 — an admin (or HR) files a timesheet for MYSELF, for an EXISTING
+// person, or for a person who does not exist yet.
 //
 // This deliberately does NOT go through /api/data: lib/aws/data.js forces the
 // owner column to the caller, so a write for someone else lands on the admin's
-// own record. It posts to /api/admin/timesheet, which re-checks the admin role
-// on the server, derives the hours from `days`, retires any existing current
-// row for that person+month, and stamps the row so it is distinguishable from
-// something the employee submitted themselves.
+// own record. It posts to /api/admin/timesheet, which re-checks the caller's
+// role on the server, derives the hours from `days`, retires any existing
+// current row for that person+month, and stamps the row so it is
+// distinguishable from something the employee submitted themselves.
+//
+// "Who is this for?" lives in <TimesheetTargetPicker/>, which resolves the three
+// answers into ONE `target`. Everything below — the POST body, the supersede
+// prompt, the footer — reads that single object, because a screen that says one
+// name while posting another id is how the wrong person gets paid.
 // ---------------------------------------------------------------------------
-function AddTimesheetModal({ api, roster, adminProfile, initialPeriod, onClose, onSaved }) {
+function AddTimesheetModal({ api, roster, people, adminProfile, initialPeriod, onClose, onSaved }) {
   const dp = processingPeriod();
-  const [pick, setPick] = useState("");            // what the admin typed
+  const [who, setWho] = useState(EMPTY_PICK);      // {mode, pick, newName, newEmail}
   const [month, setMonth] = useState(initialPeriod?.month || dp.month);
   const [year, setYear] = useState(initialPeriod?.year || dp.year);
   const [client, setClient] = useState("");
@@ -526,25 +658,45 @@ function AddTimesheetModal({ api, roster, adminProfile, initialPeriod, onClose, 
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [emailErr, setEmailErr] = useState("");    // the server's verdict on a new person's email
   const [conflict, setConflict] = useState(null);  // existing rows to supersede
+  // The server's namesake verdict. `people` here is a page-load-old snapshot, so
+  // a person a colleague registered five minutes ago is invisible to the browser
+  // check and only the server sees the clash — this puts its answer on the panel
+  // beside the name field instead of in a generic red banner at the bottom.
+  const [sameNameFromServer, setSameNameFromServer] = useState(null);
 
-  // Type-to-filter over the registered employee list. A datalist gives the
-  // browser's own filtering with no UI library and no new styling.
-  const optionLabel = (p) => `${p.full_name || p.email}${p.email ? ` — ${p.email}` : ""}`;
-  const employee = useMemo(
-    () => roster.find((p) => optionLabel(p) === pick || p.email === pick.trim()) || null,
-    [roster, pick]
+  const target = useMemo(
+    () => resolveTarget(who, { roster, people, self: adminProfile }),
+    [who, roster, people, adminProfile]
   );
+  const creatingPerson = who.mode === "new";
+  const key = targetKey(target);
 
   useEffect(() => {
-    if (employee && !client) setClient(employee.client || "");
+    if (target?.client && !client) setClient(target.client);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [employee]);
+  }, [key]);
+
+  // The server's "that address is taken" verdict is about ONE address. The
+  // moment the admin edits it, the message is about something they no longer
+  // typed, so it has to go.
+  useEffect(() => { setEmailErr(""); }, [who.newEmail]);
+  // Same rule for the namesake list: it is the answer to ONE name. Editing the
+  // name (or switching who this is for) makes it an answer to a question nobody
+  // asked, and a stale "already registered" list is how an admin gets talked out
+  // of adding a person who genuinely isn't there.
+  useEffect(() => { setSameNameFromServer(null); }, [who.newName, who.mode]);
+
+  // A document is stored under the EMPLOYEE's id prefix, and a person who does
+  // not exist yet has no id — so there is nothing to attach it to. Drop any file
+  // already chosen rather than silently filing it against the wrong person.
+  useEffect(() => { if (creatingPerson) setFile(null); }, [creatingPerson]);
 
   // A conflict is about one specific person+month; changing either makes the
   // "replace it" prompt stale, and acting on a stale prompt would supersede a
   // timesheet the admin never looked at.
-  useEffect(() => { setConflict(null); }, [pick, month, year]);
+  useEffect(() => { setConflict(null); }, [key, month, year]);
 
   // Rebuild the (empty) month grid whenever the period changes, so weekends and
   // US holidays are marked exactly as they are on the employee's own screen.
@@ -553,27 +705,72 @@ function AddTimesheetModal({ api, roster, adminProfile, initialPeriod, onClose, 
   }, [month, year]);
 
   const totals = rollup(days);
-  const ready = !!employee && note.trim().length >= 3 && totals.total > 0;
+
+  // WHAT HAPPENS TO THIS ROW WHEN IT LANDS — mirrored from the route's `status`
+  // block (app/api/admin/timesheet/route.js: `const approved = !forSelf &&
+  // canReview(user)`), using the same predicate module, because telling an HR
+  // user their filing is "approved and payable" when it is actually queued for
+  // an admin's review is a lie about somebody's wages.
+  //   admin, for someone else -> approved and payable now
+  //   HR, for someone else    -> submitted, waits for an admin
+  //   anyone, for themselves  -> submitted; nobody approves their own wages
+  const willBeApproved = !!target && target.kind !== "self" && canReview(adminProfile);
+
+  // The note is the only human record of hours nobody self-reported, so the
+  // server REQUIRES it when filing on someone else's behalf and deliberately
+  // does not for your own. Demanding one for your own hours only teaches people
+  // to type "." to get past it, so this matches the route rather than being
+  // stricter than it for the sake of looking careful.
+  const noteRequired = !!target && target.kind !== "self";
+  const noteOk = !noteRequired || note.trim().length >= 3;
+  const ready = !!target && noteOk && totals.total > 0;
 
   async function submit(supersede) {
-    setBusy(true); setErr("");
+    if (!target) return;
+    setBusy(true); setErr(""); setEmailErr("");
     try {
       // The document (if any) is stored under the EMPLOYEE's prefix, which
       // /api/storage/upload already allows an admin to write to. That keeps the
       // employee able to read their own source file and keeps the console's
-      // per-employee file lookup working unchanged.
+      // per-employee file lookup working unchanged. A person being created in
+      // this same request has no id yet, so there is no prefix to write to and
+      // the file input is disabled for that case.
       let filePayload = null;
-      if (file) {
+      if (file && target.id) {
         const ext = (file.name.split(".").pop() || "dat").toLowerCase();
-        const path = `${employee.id}/${year}-${String(month).padStart(2, "0")}/${Date.now()}.${ext}`;
+        const path = `${target.id}/${year}-${String(month).padStart(2, "0")}/${Date.now()}.${ext}`;
         const { error: upErr } = await api.storage.from("ts-uploads").upload(path, file);
         if (upErr) throw new Error(upErr.message || "couldn't upload that document");
         filePayload = { path, name: file.name, mime: file.type || null, size: file.size || null };
       }
+      // ONE request, whether or not a person has to be created first. `for:"new"`
+      // makes the route register the person INSIDE the same transaction as the
+      // filing, so a failure anywhere rolls the person back too. Creating them
+      // with a separate POST /api/admin/people first would leave an orphan
+      // payroll record behind every time the filing then failed, and no client
+      // can make two HTTP calls atomic.
+      //
+      // Note what is NOT sent: no role, and no totals. The route ignores client
+      // totals and derives them from `days`; `newPerson` has no role key to aim
+      // at, and lib/aws/people.js writes 'employee' as a literal.
       const res = await fetch("/api/admin/timesheet", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          employeeUserId: employee.id, year: Number(year), month: Number(month),
+          for: target.kind === "self" ? "self" : target.kind === "new" ? "new" : "existing",
+          // Ignored by the route in self/new mode; sent only for "existing".
+          employeeUserId: target.kind === "existing" ? target.id : null,
+          newPerson: target.kind === "new"
+            ? { full_name: target.name, email: target.email, client: client || null,
+                // The payroll import's match key. Sent because it is guarded —
+                // the server refuses a code that belongs to somebody else, and
+                // the export refuses a period in which two people share one.
+                employee_code: target.code || null,
+                // The admin's answer to "somebody of this name already exists".
+                // Absent/false means the question has not been answered and the
+                // server asks it (409 needsDistinctConfirmation).
+                confirmDistinctPerson: target.confirmDistinct === true }
+            : null,
+          year: Number(year), month: Number(month),
           days, note: note.trim(), supersede: !!supersede,
           fields: { client: client || null },
           questionnaire: { enteredByAdmin: true, adminEmail: adminProfile?.email || null },
@@ -583,7 +780,31 @@ function AddTimesheetModal({ api, roster, adminProfile, initialPeriod, onClose, 
       const j = await res.json().catch(() => ({}));
       if (!res.ok) {
         if (j.needsSupersede) { setConflict(j.existing || []); setBusy(false); return; }
-        throw new Error(j.error || "couldn't file this timesheet");
+        // "Somebody of this name is already registered" — a question, not a
+        // failure. Put the people the server found onto the panel so the admin
+        // can see WHO they might be duplicating and either pick them or say this
+        // is a different human. Nothing was written: the route rolled the whole
+        // filing back, person included.
+        if (j.needsDistinctConfirmation) {
+          setSameNameFromServer(j.sameName || []); setBusy(false); return;
+        }
+        const msg = j.error || "couldn't file this timesheet";
+        // A clashing employee code is about ONE field too, and it is the field a
+        // payroll import matches on — so it belongs beside that input, not in a
+        // banner. Checked BEFORE the email branch: its message mentions the
+        // person's email, which the /e-?mail/ test below would otherwise claim.
+        if (target.kind === "new" && j.duplicateEmployeeCode) {
+          setErr(`${msg}${j.hint ? ` ${j.hint}` : ""}`); setBusy(false); return;
+        }
+        // A clashing or malformed address is a fixable mistake about ONE field,
+        // not a failed filing — put it on that field so the admin can correct it
+        // where they typed it. `duplicateEmail` is the route's own marker; the
+        // text match additionally catches PersonInputError's 400s, which are
+        // about the email or the name and carry no code.
+        if (target.kind === "new" && (j.duplicateEmail || /e-?mail/i.test(msg))) {
+          setEmailErr(j.hint ? `${msg} ${j.hint}` : msg); setBusy(false); return;
+        }
+        throw new Error(msg);
       }
       setBusy(false);
       onSaved();
@@ -598,29 +819,24 @@ function AddTimesheetModal({ api, roster, adminProfile, initialPeriod, onClose, 
       <div className="modal wide" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <div>
-            <h3 style={{ fontSize: 16 }}>Add a timesheet for an employee</h3>
+            <h3 style={{ fontSize: 16 }}>Add a timesheet</h3>
             <div className="muted" style={{ fontSize: 12 }}>
-              Filed in the employee’s name, signed by you, and marked “entered by admin”.
+              {target?.kind === "self"
+                ? "Filed in your own name, like any other employee submission."
+                : "Filed in the employee’s name, signed by you, and marked “entered by admin”."}
             </div>
           </div>
           <button className="x" onClick={onClose} aria-label="Close">×</button>
         </div>
         <div className="modal-body">
+          <TimesheetTargetPicker
+            value={who} onChange={setWho}
+            roster={roster} people={people} self={adminProfile}
+            serverEmailError={emailErr}
+            serverSameName={sameNameFromServer}
+          />
+
           <div className="grid-2">
-            <div className="field">
-              <label>Employee <Req /></label>
-              <input list="ts-admin-roster" value={pick} autoComplete="off"
-                     onChange={(e) => setPick(e.target.value)}
-                     placeholder="Type a name or email…" />
-              <datalist id="ts-admin-roster">
-                {roster.map((p) => <option key={p.id} value={optionLabel(p)} />)}
-              </datalist>
-              <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-                {employee
-                  ? <span style={{ color: "var(--green)" }}>✓ {employee.full_name || employee.email}</span>
-                  : `Pick one of ${roster.length} registered employees.`}
-              </div>
-            </div>
             <div className="field">
               <label>Period <Req /></label>
               <div className="row" style={{ gap: 8 }}>
@@ -640,26 +856,49 @@ function AddTimesheetModal({ api, roster, adminProfile, initialPeriod, onClose, 
             </div>
             <div className="field">
               <label>Source document</label>
-              <input type="file" onChange={(e) => setFile(e.target.files?.[0] || null)} />
+              <input type="file" disabled={creatingPerson}
+                     onChange={(e) => setFile(e.target.files?.[0] || null)} />
               <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-                Optional. Stored against the employee so they can see it too.
+                {creatingPerson
+                  ? "Not available while adding a new person — a document is stored against " +
+                    "their record, which doesn’t exist until you file this. File it, then " +
+                    "attach the document by filing again over the top."
+                  : "Optional. Stored against the employee so they can see it too."}
               </div>
             </div>
           </div>
 
           <div className="field">
-            <label>Why are you filing this for them? <Req /></label>
+            <label>
+              {noteRequired
+                ? <>Why are you filing this for them? <Req /></>
+                : "Note (optional)"}
+            </label>
             <input value={note} onChange={(e) => setNote(e.target.value)}
-                   placeholder="e.g. Paper timesheet handed in on 3 Aug — employee has no laptop access" />
+                   placeholder={noteRequired
+                     ? "e.g. Paper timesheet handed in on 3 Aug — employee has no laptop access"
+                     : "optional — anything payroll should know about this month"} />
             <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-              Required. These hours are payable without anyone else reviewing them, so this
-              note and the audit entry are the only record of why they exist.
+              {noteRequired
+                ? (willBeApproved
+                    ? "Required. These hours are payable without anyone else reviewing them, so this " +
+                      "note and the audit entry are the only record of why they exist."
+                    : "Required. Nobody else has seen these hours yet — this note is what the admin " +
+                      "reviewing them will read.")
+                : "Not required for your own hours — they go to review like anyone else’s."}
             </div>
           </div>
 
           <div className="tiles" style={{ margin: "16px 0" }}>
             <div className="tile reg"><div className="v">{totals.regular}</div><div className="l">Regular</div></div>
             <div className="tile ot"><div className="v">{totals.overtime}</div><div className="l">Overtime</div></div>
+            {/* Paid but not worked (holiday pay / PTO / sick). Shown only when
+                there is some, but shown WHENEVER there is: it is part of Total,
+                so without it these tiles read "2 + 0 = 10". */}
+            {Number(totals.other) > 0 ? (
+              <div className="tile"><div className="v">{totals.other}</div>
+                <div className="l">Other (paid, not worked)</div></div>
+            ) : null}
             <div className="tile tot"><div className="v">{totals.total}</div><div className="l">Total</div></div>
             <div className="tile"><div className="v">{totals.daysWorked}</div><div className="l">Days worked</div></div>
           </div>
@@ -676,7 +915,7 @@ function AddTimesheetModal({ api, roster, adminProfile, initialPeriod, onClose, 
           {conflict && (
             <div className="alert warn" style={{ margin: "12px 0" }}>
               <div>
-                <b>{employee?.full_name || "This employee"} already has a timesheet for {MONTHS[month - 1]} {year}</b>
+                <b>{target?.name || "This employee"} already has a timesheet for {MONTHS[month - 1]} {year}</b>
                 {" "}({conflict.map((c) => c.status).join(", ")}).
                 Filing yours will mark {conflict.length === 1 ? "it" : "them"} as <b>replaced</b>, so payroll
                 still sees exactly one timesheet for this month. The replaced {conflict.length === 1 ? "row stays" : "rows stay"} visible
@@ -692,13 +931,24 @@ function AddTimesheetModal({ api, roster, adminProfile, initialPeriod, onClose, 
 
           <div className="between" style={{ marginTop: 8 }}>
             <span className="muted" style={{ fontSize: 12 }}>
-              Filed as approved and payable, in {employee?.full_name || "the employee"}’s name.
+              {!target
+                ? "Choose who this timesheet is for before filing it."
+                : willBeApproved
+                  ? <>Filed as <b>approved and payable</b>, in <b>{target.name}</b>’s name
+                      {target.kind === "new" ? ", who is added to payroll in the same step" : ""}.</>
+                  : target.kind === "self"
+                    ? <>Filed in your own name and sent for <b>review</b> — nobody approves their own hours.</>
+                    : <>Filed in <b>{target.name}</b>’s name
+                        {target.kind === "new" ? ", who is added to payroll in the same step" : ""},
+                        and sent for <b>review</b>: HR enters hours, an admin approves them.</>}
             </span>
             <div className="row">
               <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
               <button className="btn btn-primary" disabled={!ready || busy || !!conflict}
                       onClick={() => submit(false)}>
-                {busy ? "Filing…" : "File this timesheet"}
+                {busy
+                  ? (target?.kind === "new" ? "Adding & filing…" : "Filing…")
+                  : (target?.kind === "new" ? "Add them and file this timesheet" : "File this timesheet")}
               </button>
             </div>
           </div>
@@ -713,15 +963,7 @@ function AddTimesheetModal({ api, roster, adminProfile, initialPeriod, onClose, 
   );
 }
 
-// A required-field marker: what must be filled in, obvious before the save
-// button refuses. Same `.req` class (and `--req` colour) as the employee form —
-// NOT a local red copy. Red is reserved for "what you typed is wrong"; this is
-// "you still have to fill this in", and one app must not spell it two ways.
-function Req() {
-  return <span className="req" title="Required" aria-hidden="true">*</span>;
-}
-
-function SubmissionDetail({ edit, profile, adminProfile, reviewer, sourceFile, api, onClose, onSaved }) {
+function SubmissionDetail({ edit, profile, adminProfile, reviewer, canDecide, sourceFile, api, onClose, onSaved }) {
   // `days` is the heavy part of a submission (one entry per calendar day), so
   // the list query no longer carries it. Fetch it for just this submission.
   //
@@ -767,12 +1009,20 @@ function SubmissionDetail({ edit, profile, adminProfile, reviewer, sourceFile, a
   // numbers on a submission payroll was already paying a corrected amount for,
   // and seeded the correction box with them.
   const stored = edit.final_total != null
-    ? { regular: edit.final_regular, overtime: edit.final_overtime, total: edit.final_total,
+    ? { regular: edit.final_regular, overtime: edit.final_overtime,
+        // Paid-but-not-worked hours are part of the total, so a screen that shows
+        // the total must show them too — otherwise the reviewer signs off "2 + 0 =
+        // 10". Corrected rows before final_other existed have to fall back to the
+        // residual, exactly as the payroll export does.
+        other: edit.final_other ?? (Number(edit.final_total) - Number(edit.final_regular || 0)
+                                                            - Number(edit.final_overtime || 0)),
+        total: edit.final_total,
         daysWorked: submitted.daysWorked ?? submitted.days_worked }
     : submitted;
   const storedView = {
     regular: Number(stored.regular ?? stored.total ?? 0),
     overtime: Number(stored.overtime ?? 0),
+    other: Number(stored.other ?? 0),
     total: Number(stored.total ?? 0),
     daysWorked: stored.daysWorked ?? stored.days_worked ?? "—",
   };
@@ -795,6 +1045,25 @@ function SubmissionDetail({ edit, profile, adminProfile, reviewer, sourceFile, a
   const st = statusOf(edit);
   const sb = STATUS_BADGE[st] || STATUS_BADGE.submitted;
   const isReplaced = st === "superseded";
+  // YOUR OWN TIMESHEET. An admin can file their own hours (the "myself" option
+  // in the Add-timesheet modal, or the ordinary employee dashboard), and the row
+  // lands in the very queue this console renders. /api/admin/review REFUSES to
+  // review it (lib/aws/roles.js isSelfReview) — that refusal is the control, and
+  // it holds against curl. This is only so the buttons that would call it aren't
+  // sitting there waiting to fail: an approve button that always errors teaches
+  // an admin the console is broken, not that the rule exists.
+  const isOwnSubmission =
+    !!adminProfile?.id && String(adminProfile.id) === String(edit.user_id);
+  // Same effect as "replaced" on every editing control: read-only.
+  // ...and the third reason a panel is read-only: THE VIEWER MAY NOT DECIDE AT
+  // ALL. An HR user reaches this console to file hours and to see who still
+  // owes a timesheet; approving, rejecting and correcting are an admin's
+  // (lib/aws/roles.js), and /api/admin/review refuses HR on the server. Folding
+  // it into `locked` rather than adding a second read-only flag is deliberate:
+  // one variable disables the day grid, the correction inputs, the note and all
+  // four decision buttons, so a control cannot be added later and be caught by
+  // only one of the two.
+  const locked = isReplaced || isOwnSubmission || !canDecide;
   const daysDirty = JSON.stringify(days) !== baseDays;
   const summaryDirty = summaryOnly &&
     (Number(sumReg) !== Number(storedView.regular) ||
@@ -843,6 +1112,10 @@ function SubmissionDetail({ edit, profile, adminProfile, reviewer, sourceFile, a
       fields: { ...(edit.fields || {}), totals: {
         regular: submission?.final_regular ?? r.regular,
         overtime: submission?.final_overtime ?? r.overtime,
+        // Without this the revision trail records a total it cannot explain —
+        // the same gap the payroll CSV had, preserved forever in the audit row
+        // an auditor would use to check the CSV against.
+        other: submission?.final_other ?? r.other ?? 0,
         total: submission?.final_total ?? r.total,
       } },
       days, questionnaire: q, validation: edit.validation || {}, note: note.trim(),
@@ -914,6 +1187,22 @@ function SubmissionDetail({ edit, profile, adminProfile, reviewer, sourceFile, a
               for audit only — it counts toward nothing and cannot be reviewed.
             </div>
           )}
+          {isOwnSubmission && !isReplaced && (
+            <div className="alert warn" style={{ marginBottom: 14 }}>
+              This is <b>your own timesheet</b>. Whoever files hours must not be the one who signs
+              them off, so you can’t approve, reject or correct it — <b>another admin</b> has to.
+              Until one does, it stays out of the payroll export like any unreviewed submission.
+            </div>
+          )}
+          {/* Say WHY it is read-only. A panel with no buttons and no sentence
+              reads as a bug; the same rule that stops HR approving what HR typed
+              is the reason this one is a viewer. */}
+          {!canDecide && !isReplaced && !isOwnSubmission && (
+            <div className="alert info" style={{ marginBottom: 14 }}>
+              You’re viewing this submission. Approving, rejecting and correcting payroll figures
+              are an <b>admin’s</b> — whoever files hours must not be the one who signs them off.
+            </div>
+          )}
           {enteredByAdmin(edit) && (
             <div className="alert info" style={{ marginBottom: 14 }}>
               Filed by <b>{edit.fields.entry.by_name || edit.fields.entry.by_email}</b> on the
@@ -925,6 +1214,13 @@ function SubmissionDetail({ edit, profile, adminProfile, reviewer, sourceFile, a
           <div className="tiles" style={{ marginBottom: 16 }}>
             <div className="tile reg"><div className="v">{r.regular}</div><div className="l">Regular</div></div>
             <div className="tile ot"><div className="v">{r.overtime}</div><div className="l">Overtime</div></div>
+            {/* Same reason as the entry preview: this is the screen where the
+                hours are signed off, and Regular + Overtime does not equal Total
+                on any submission carrying holiday pay, PTO or sick time. */}
+            {Number(r.other) > 0 ? (
+              <div className="tile"><div className="v">{r.other}</div>
+                <div className="l">Other (paid, not worked)</div></div>
+            ) : null}
             <div className="tile tot"><div className="v">{r.total}</div><div className="l">Total</div></div>
             <div className="tile"><div className="v">{r.daysWorked}</div><div className="l">Days worked</div></div>
           </div>
@@ -937,7 +1233,7 @@ function SubmissionDetail({ edit, profile, adminProfile, reviewer, sourceFile, a
                 below is empty. The totals above come from the document’s summary.
                 Use “Preview document” to verify against the original.
               </div>
-              {!isReplaced && (
+              {!locked && (
                 <div className="grid-2" style={{ marginBottom: 16 }}>
                   <div className="field">
                     <label>Corrected regular hours</label>
@@ -981,12 +1277,24 @@ function SubmissionDetail({ edit, profile, adminProfile, reviewer, sourceFile, a
           <AgentTrace trace={edit.fields?.agent_trace} flow={edit.fields?.flow} />
 
           <h3 className="card-title">
-            Calendar{isReplaced ? "" : " — click a day to correct as admin"}
+            Calendar{locked ? "" : " — click a day to correct as admin"}
           </h3>
           <Calendar calendar={days} month={edit.month} year={edit.year}
-                    onDayClick={isReplaced ? () => {} : setDayIdx} />
+                    onDayClick={locked ? () => {} : setDayIdx} />
 
-          {!isReplaced && (
+          {/* The decision controls carry the only Close button, so a read-only
+              panel needs its own — leaving just the × means the way out of a
+              payroll record is an unlabelled glyph. */}
+          {locked && (
+            <div className="between" style={{ marginTop: 16 }}>
+              <span className="muted" style={{ fontSize: 12 }}>
+                Read-only — nothing on this panel changes the record.
+              </span>
+              <button className="btn btn-ghost" onClick={onClose}>Close</button>
+            </div>
+          )}
+
+          {!locked && (
             <>
               <div className="field" style={{ marginTop: 16 }}>
                 <label>

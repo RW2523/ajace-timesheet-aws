@@ -169,6 +169,15 @@ alter table public.ts_employee_edits
   -- use what the employee submitted". Payroll reads coalesce(final_*, submitted).
   add column if not exists final_regular  numeric,
   add column if not exists final_overtime numeric,
+  -- PAID BUT NOT WORKED (holiday pay / PTO / sick). It is part of final_total —
+  -- the summation has always been regular + overtime + other — but it had no
+  -- column of its own, so a corrected row could only say "total 10, of which 2
+  -- regular and 0 overtime" and the remaining 8 paid hours had no name anywhere.
+  -- The payroll CSV printed exactly that, and an import summing the two hour
+  -- columns underpaid by the difference. Written in the same statement as the
+  -- three above, from the same derived object, so the breakdown can never drift
+  -- from the total it belongs to.
+  add column if not exists final_other    numeric,
   add column if not exists final_total    numeric,
   -- The DAY GRID the corrected figures above were summed from. `days` stays the
   -- employee's submission, verbatim and untouched; this is the admin's replacement
@@ -284,4 +293,104 @@ begin
   alter table public.ts_admin_edits    drop constraint if exists ts_admin_edits_timesheet_id_fkey;
   alter table public.ts_admin_edits    add  constraint ts_admin_edits_timesheet_id_fkey
     foreign key (timesheet_id) references public.ts_timesheets(id) on delete restrict;
+end $$;
+
+-- ---------- the HR role ------------------------------------------------------
+-- Payroll is entered by two kinds of privileged staff, not one. HR files hours
+-- on behalf of people and registers new people; only an ADMIN reviews, approves
+-- and exports. Keeping HR out of the approval seat is the point: whoever types
+-- a wage figure must not also be the one who signs it off.
+--
+-- Postgres has no "alter check constraint", so widening these is drop-then-add,
+-- and the ADD re-validates every existing row (a full scan holding an ACCESS
+-- EXCLUSIVE lock). The production box already holds real payroll data, so the
+-- re-add is GUARDED: if the constraint already admits 'hr' this block does
+-- nothing at all. Re-running the schema is therefore free, not a table rewrite.
+--
+-- The names dropped below are the ones Postgres auto-generated for the inline
+-- column checks at the top of this file; verified with
+--   select conname from pg_constraint
+--    where conrelid in ('public.auth_users'::regclass,'public.ts_profiles'::regclass)
+--      and contype='c';
+-- -> auth_users_role_check, ts_profiles_role_check
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+     where conrelid = 'public.auth_users'::regclass
+       and conname  = 'auth_users_role_check'
+       and pg_get_constraintdef(oid) like '%hr%'
+  ) then
+    alter table public.auth_users drop constraint if exists auth_users_role_check;
+    alter table public.auth_users add constraint auth_users_role_check
+      check (role in ('employee','admin','hr'));
+  end if;
+
+  if not exists (
+    select 1 from pg_constraint
+     where conrelid = 'public.ts_profiles'::regclass
+       and conname  = 'ts_profiles_role_check'
+       and pg_get_constraintdef(oid) like '%hr%'
+  ) then
+    alter table public.ts_profiles drop constraint if exists ts_profiles_role_check;
+    alter table public.ts_profiles add constraint ts_profiles_role_check
+      check (role in ('employee','admin','hr'));
+  end if;
+end $$;
+
+-- Email is the PAYROLL IDENTITY and the export's join column, so two accounts
+-- differing only in case are two payslips for one person. `email text unique`
+-- above is a case-SENSITIVE index: 'Bob@ajace.com' and 'bob@ajace.com' both fit
+-- through it. Everything in the app lowercases before inserting; this is the
+-- database making that a guarantee rather than a habit.
+--
+-- If this statement FAILS on an existing deployment it has found real duplicate
+-- identities that differ only in case. That is a payroll bug needing a human to
+-- decide which row is the person — do not work around it by dropping the index.
+create unique index if not exists auth_users_email_lower_uniq
+  on public.auth_users (lower(email));
+
+-- ---------------------------------------------------------------------------
+-- ts_profiles.employee_code — THE COLUMN A PAYROLL IMPORT ACTUALLY MATCHES ON.
+--
+-- The export prints it. The downstream payroll system joins on it. It had no
+-- uniqueness of any kind, at any layer, and that is not a theoretical gap: three
+-- profiles were created for one person, all carrying employee_code 'EC-NORA' on
+-- three different email addresses, and the export emitted all three as payable.
+-- The double-pay assertion did not fire because it counts approved rows per
+-- user_id and there was exactly one per user_id — three user_ids, one human.
+--
+-- Case and repeated whitespace are not identity, so the index folds them: a code
+-- typed 'ec-nora ' is the same code as 'EC-NORA'. Blank/NULL codes are excluded
+-- (the picker does not require one), so any number of people may have no code —
+-- for those the export falls back to email, which is unique by the index above.
+--
+-- WHY THIS IS ATTEMPTED AND NOT ASSERTED. The email index above is allowed to
+-- abort a schema apply, because two accounts differing only in case is always
+-- corruption. Duplicate employee codes on an existing production box are more
+-- likely to be historical junk ('N/A', 'TBC', a code reused after somebody
+-- left), and aborting the apply there takes down every unrelated deploy until a
+-- human has time to unpick payroll history. So a dirty table gets a LOUD WARNING
+-- naming the offending codes rather than a failed apply — and the guarantee is
+-- not lost in the meantime, because app/api/admin/export/route.js REFUSES to
+-- emit a CSV in which two people share a code. The index stops new duplicates;
+-- the export gate stops old ones being paid. Fix the data and re-apply to get
+-- the index. Do NOT "fix" this by deleting the warning.
+do $$
+declare dupes text;
+begin
+  select string_agg(c, ', ') into dupes from (
+    select lower(regexp_replace(btrim(employee_code), '\s+', ' ', 'g')) as c
+      from public.ts_profiles
+     where employee_code is not null and btrim(employee_code) <> ''
+     group by 1 having count(*) > 1
+     order by 1 limit 20
+  ) d;
+  if dupes is null then
+    create unique index if not exists ts_profiles_employee_code_lower_uniq
+      on public.ts_profiles (lower(regexp_replace(btrim(employee_code), '\s+', ' ', 'g')))
+      where employee_code is not null and btrim(employee_code) <> '';
+  else
+    raise warning 'ts_profiles.employee_code is shared by more than one person: %. The unique index was NOT created. A payroll import matches on that column, so these people cannot be told apart downstream — merge or re-code them, then re-apply this schema. Until then the payroll export will REFUSE any period containing them.', dupes;
+  end if;
 end $$;

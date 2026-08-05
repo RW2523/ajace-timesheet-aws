@@ -47,14 +47,47 @@ ok("submission created", !r.error && !!id, r.error || "");
 ok("no corrected grid until an admin corrects it", r.data?.final_days === null, JSON.stringify(r.data?.final_days));
 
 console.log("\n── final_days is READ-ONLY to the browser, like every other final_* ──");
+// The day entry is DATED. It used to be a bare `{ regular: 1 }`, which lib/hours.js
+// now refuses outright: hours that name no calendar day cannot be checked against
+// the 24-hour daily ceiling, and "forty undated entries of 18 hours" is exactly
+// how that ceiling was defeated. The dateless case gets its own assertion below;
+// this one is about final_* being read-only and needs a grid that is otherwise valid.
 r = await execute(employee, {
   table: "ts_employee_edits", op: "insert", single: true,
-  values: { user_id: EMP, month: 10, year: 2026, days: [{ regular: 1 }],
+  values: { user_id: EMP, month: 10, year: 2026, days: [{ date: "2026-10-01", regular: 1 }],
             final_days: [{ regular: 999 }], final_total: 999,
             fields: {}, questionnaire: {}, validation: {}, submitted: true },
 });
 ok("a client-supplied final_days is ignored, not stored", r.data?.final_days === null, JSON.stringify(r.data?.final_days));
 ok("a client-supplied final_total is ignored too", r.data?.final_total === null, String(r.data?.final_total));
+
+console.log("\n── and the grid it is corrected FROM must be one row per real day ──");
+// Same 24h ceiling, defeated by repeating a date: two entries of 24h on
+// 2026-11-02 derived to 48 payable hours on one calendar day, approved and
+// exported. The bound is now per calendar date, so this is refused at the
+// derivation, before anything is stored.
+r = await execute(employee, {
+  table: "ts_employee_edits", op: "insert", single: true,
+  values: { user_id: EMP, month: 11, year: 2026,
+            days: [{ date: "2026-11-02", regular: 24 }, { date: "2026-11-02", regular: 24 }],
+            fields: {}, questionnaire: {}, validation: {}, submitted: true },
+});
+ok("48h split across two entries on ONE date is refused", !!r.error && !r.data, JSON.stringify(r.data || r.error));
+r = await execute(employee, {
+  table: "ts_employee_edits", op: "insert", single: true,
+  values: { user_id: EMP, month: 11, year: 2026, days: [{ regular: 18 }, { regular: 18 }],
+            fields: {}, questionnaire: {}, validation: {}, submitted: true },
+});
+ok("hours on an entry with no date are refused too", !!r.error && !r.data, JSON.stringify(r.data || r.error));
+r = await execute(employee, {
+  table: "ts_employee_edits", op: "insert", single: true,
+  values: { user_id: EMP, month: 12, year: 2026,
+            days: [{ date: "2026-12-01", regular: 8 }, { date: "2026-12-02", regular: 8 }],
+            fields: {}, questionnaire: {}, validation: {}, submitted: true },
+});
+ok("one row per day is still accepted and derives 16h",
+   !r.error && Number(r.data?.fields?.totals?.total ?? 16) === 16 && !!r.data,
+   r.error || JSON.stringify(r.data?.days));
 
 console.log("\n── the console can READ it (it is the grid of record once set) ──");
 await query(`update ts_employee_edits

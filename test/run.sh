@@ -12,7 +12,12 @@
 # dropped at the end, and the suite refuses to run without one.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SUITE=(data-layer review-flow derived-totals derivation-escape draft-resume corrected-grid fields-provenance)
+# people-registration is LAST on purpose: it is the only member that imports and
+# EXECUTES real app/api route handlers, and it registers people, so it must not
+# be able to colour the data the earlier tests read. It needs the database and
+# must never be skippable — it is what proves that a payroll-only record cannot
+# log in, that only admin/HR can create one, and that one is always an employee.
+SUITE=(data-layer review-flow derived-totals derivation-escape draft-resume corrected-grid fields-provenance people-registration)
 
 # Syntax gate first: needs no database, so it runs even when the DB checks
 # below would abort. Do NOT replace this with `node --check`: on Node >= 20 a
@@ -37,11 +42,33 @@ node "$ROOT/test/holiday-toggle.test.mjs"
 # toggles (hours stayed in `days` and were still paid) and the manager-approval
 # seeding (every employee asked to attest "not approved"). Needs no database.
 node "$ROOT/test/questionnaire-contract.test.mjs"
+# target-picker does the same for the admin console's "who is this timesheet
+# for?" control, and additionally EXECUTES the rule that decides whose payroll
+# record the hours land on (lib/roster.js is kept JSX-free for exactly that).
+# It also asserts the admin/hr gate is on BOTH the trigger and the modal, and
+# that a new person is created in the same request that files their timesheet —
+# two separate calls would leave an orphan payroll record behind on failure.
+# Needs no database.
+node "$ROOT/test/target-picker.test.mjs"
+# ...and this one RENDERS the picker (react-dom/server, no browser) to check the
+# sentences an admin actually reads: that an unmatched name offers "add them"
+# rather than silently doing nothing, and that the new-person panel still says
+# the account cannot log in and names deploy/scripts/set-password.sh. An admin
+# who believes they created a working login files a support ticket at best.
+node "$ROOT/test/target-picker-render.test.cjs"
 # preview asserts that the file picker refuses exactly what /api/storage/upload
 # refuses, and that every accepted extension has a defined preview outcome. A
 # regression here detaches a document from a payroll submission with only an
 # amber note. Needs no database.
 node "$ROOT/test/preview.test.mjs"
+# email-identity asserts that a person cannot be registered under an address
+# that only LOOKS like somebody else's — an invisible U+200B, a Cyrillic о, a
+# trailing dot. Each of those is a distinct byte string, so every uniqueness
+# check in the stack (lower(email) in JS, the unique index in Postgres) admits
+# it, and the twin then appears in the review queue and the payroll CSV as a
+# second row identical on screen to the real person's. HR could file 200 hours
+# against one and the approving admin had no cue. Needs no database.
+node "$ROOT/test/email-identity.test.mjs"
 
 run_suite() {  # $1 = connection string, $2 = "disable" for plaintext, else TLS
   export DATABASE_URL="$1"

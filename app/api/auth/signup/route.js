@@ -3,6 +3,7 @@ import { pool, queryOne } from "@/lib/aws/db";
 import { hashPassword, signSession, setSessionCookie } from "@/lib/aws/auth";
 import { rateLimit, clientIp } from "@/lib/aws/ratelimit";
 import { passwordProblem } from "@/lib/aws/password";
+import { hasNonAscii, emailShapeProblem } from "@/lib/roster";
 
 export const runtime = "nodejs";
 
@@ -29,7 +30,18 @@ export async function POST(request) {
 
   const { email, password, meta = {} } = await request.json().catch(() => ({}));
   const addr = String(email || "").trim().toLowerCase();
-  if (!addr || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(addr)) {
+  // THE SAME ADDRESS RULE AS /api/admin/people, and for a stronger reason.
+  //
+  // This route used to accept /^[^@\s]+@[^@\s]+\.[^@\s]+$/, and JavaScript's \s
+  // does not match zero-width or format characters — so "no<U+200B>ra@ajace.com"
+  // was a distinct account beside "nora@ajace.com", visually identical in the
+  // review queue and the payroll CSV. Over there the twin at least cannot log in
+  // (it carries the unusable-password marker); an account minted HERE chooses its
+  // own password and is fully usable, so admitting a look-alike here is worse.
+  //
+  // The domain allow-list below is not a defence against it: a look-alike in the
+  // LOCAL part leaves the domain untouched and sails through.
+  if (!addr || hasNonAscii(addr) || emailShapeProblem(addr)) {
     return NextResponse.json({ error: "A valid work email is required." }, { status: 400 });
   }
   const pwProblem = passwordProblem(password);

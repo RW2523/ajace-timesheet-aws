@@ -1,8 +1,13 @@
 "use client";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/api/client";
+// The same predicate app/admin/page.js guards with. A nav link that leads to a
+// redirect, or a missing link to a page you are allowed to open, are the two
+// halves of the same bug — so both ask this one function.
+import { canFileForOthers } from "@/lib/aws/roles";
 
 export default function Topbar({ profile, active }) {
+  const privileged = canFileForOthers(profile);
   const router = useRouter();
   const name = profile?.full_name || profile?.email || "User";
   const initials = name
@@ -36,13 +41,13 @@ export default function Topbar({ profile, active }) {
             >
               My Timesheet
             </a>
-            {profile?.role === "admin" && (
+            {privileged && (
               <a
                 href="/admin"
                 className="tab"
                 style={active === "admin" ? activeTab : tabStyle}
               >
-                Admin
+                {profile?.role === "admin" ? "Admin" : "Payroll"}
               </a>
             )}
           </nav>
@@ -52,9 +57,18 @@ export default function Topbar({ profile, active }) {
             <span className="avatar">{initials}</span>
             <span>
               {name}
+              {/* Spell the role the person actually HAS. The old test printed
+                  the badge only for admin, so an HR user — who can file hours in
+                  other people's names — wore no badge at all and looked like an
+                  ordinary employee to anyone reading over their shoulder. */}
               {profile?.role === "admin" && (
                 <span className="badge purple" style={{ marginLeft: 6 }}>
                   admin
+                </span>
+              )}
+              {profile?.role === "hr" && (
+                <span className="badge amber" style={{ marginLeft: 6 }}>
+                  HR
                 </span>
               )}
             </span>

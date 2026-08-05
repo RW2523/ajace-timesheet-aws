@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { queryOne } from "@/lib/aws/db";
 import { verifyPassword, signSession, setSessionCookie } from "@/lib/aws/auth";
+import { isUnusablePassword } from "@/lib/aws/people";
 import { rateLimit, rateLimitReset, clientIp } from "@/lib/aws/ratelimit";
 
 export const runtime = "nodejs";
@@ -36,6 +37,20 @@ export async function POST(request) {
       where lower(u.email) = lower($1)`,
     [account]
   );
+  // A person registered for payroll (admin/HR "add a new person") has an
+  // UNUSABLE PASSWORD MARKER where a hash would be: they never chose a password
+  // and nobody verified who they are. Refuse them HERE, before bcrypt is asked,
+  // rather than trusting bcrypt.compare to return false for a string that is not
+  // a hash. It does today — measured — but relying on that would mean an account
+  // that must never authenticate is protected by an undocumented library detail,
+  // and the same call THROWS on null/undefined, which in this handler (no
+  // try/catch) would be a 500 and a stack trace instead of a credential error.
+  // The response is byte-identical to a wrong password: whether an address is
+  // registered-but-inactive is not something an anonymous caller gets to learn.
+  if (row && isUnusablePassword(row.password_hash)) {
+    console.warn(`[auth] login refused: ${account} has no password set (payroll-only record)`);
+    return NextResponse.json({ error: "invalid email or password" }, { status: 400 });
+  }
   if (!row || !(await verifyPassword(password || "", row.password_hash))) {
     // Logged so repeated failures are visible in `pm2 logs`. Never log the password.
     console.warn(`[auth] failed login ip=${ip} account=${account}`);

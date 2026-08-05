@@ -30,6 +30,20 @@ export async function POST(request) {
         set password_hash=$1, reset_token=null, reset_expires=null,
             session_version = session_version + 1
       where reset_token=$2 and reset_expires > now()
+        -- ...AND the account already has a real password to reset.
+        --
+        -- A payroll-only record (added by admin/HR so hours could be filed)
+        -- holds an unusable marker, not a hash. Resetting one would not be
+        -- "resetting" anything — it would CREATE a working login for a person
+        -- nobody verified. /api/auth/forgot already refuses to mint a token for
+        -- these, so this should be unreachable; it is here because "unreachable"
+        -- is a property of today's callers, and the row this clause protects is
+        -- a payroll account. A token that leaks, is guessed, or is minted by
+        -- some future code path still cannot activate a dormant record.
+        --
+        -- starts_with() rather than "<> the marker": the rule is "must look like
+        -- a bcrypt hash", so an empty string or a truncated hash is refused too.
+        and starts_with(password_hash, '$2')
       returning id, email`,
     [await hashPassword(password), token]
   );
