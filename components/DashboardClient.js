@@ -450,6 +450,10 @@ export default function DashboardClient({ profile, submissions = [] }) {
         count: data.employee_count, fileName: data.file_name,
         flow: data.flow || null, agentTrace: data.agent_trace || null,
         reviewStatus: data.review_status || null,
+        // The server's signed receipt for that verdict. It is what makes the
+        // verdict stick on submit — /api/data ignores review_status/flow unless
+        // this receipt verifies against the signed-in user (lib/aws/jwt.js).
+        aiStamp: data.ai_stamp || null,
         // The extractor computes these and they were being thrown away — they
         // are the only signals that flag a bad read to the person who can fix it.
         issues: emp?.issues || [],
@@ -889,6 +893,10 @@ export default function DashboardClient({ profile, submissions = [] }) {
         fields: { ...fields, totals: r,
                   flow: aiMeta?.flow || null, agent_trace: aiMeta?.agentTrace || null,
                   review_status: aiMeta?.reviewStatus || null,
+                  // The receipt, not the claim: the server re-reads the verdict
+                  // out of this and drops the two keys above if it doesn't
+                  // verify. Not stored — it is an input, like `days`.
+                  ai_stamp: aiMeta?.aiStamp || null,
                   // The compact approval record, so the admin list can show a
                   // column and build the chase-list without opening every
                   // questionnaire blob. Its own key, deliberately NOT inside

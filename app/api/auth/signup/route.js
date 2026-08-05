@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { query, queryOne } from "@/lib/aws/db";
+import { pool, queryOne } from "@/lib/aws/db";
 import { hashPassword, signSession, setSessionCookie } from "@/lib/aws/auth";
 import { rateLimit, clientIp } from "@/lib/aws/ratelimit";
 import { passwordProblem } from "@/lib/aws/password";
@@ -63,21 +63,44 @@ export async function POST(request) {
 
   const role = isFirstUser ? "admin" : "employee";
   const hash = await hashPassword(password);
-  const u = await queryOne(
-    `insert into public.auth_users (email, password_hash, role) values ($1,$2,$3)
-     returning id, email, role`,
-    [addr, hash, role]
-  );
-  // provision the timesheet profile
-  await query(
-    `insert into public.ts_profiles
-       (id,email,full_name,phone,role,employer,client,job_title,employee_code,country,manager_name,manager_email)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,coalesce($10,'US'),$11,$12)
-     on conflict (id) do nothing`,
-    [u.id, addr, meta.full_name || "", meta.phone || null, role, meta.employer || null,
-     meta.client || null, meta.job_title || null, meta.employee_code || null,
-     meta.country || "US", meta.manager_name || null, meta.manager_email || null]
-  );
+
+  // THE LOGIN AND THE PROFILE ARE ONE ACT, so they are ONE TRANSACTION.
+  // These used to be two independent statements: if the second failed (a bad
+  // `meta` value, a dropped connection, a restart between the two), the account
+  // still existed and could log in and submit hours — but had no ts_profiles
+  // row, and payroll reporting is keyed on that row. The result was an employee
+  // who could work all month and then be missing from the export entirely.
+  // Either both rows exist or neither does.
+  const client = await pool().connect();
+  let u;
+  try {
+    await client.query("begin");
+    u = (await client.query(
+      `insert into public.auth_users (email, password_hash, role) values ($1,$2,$3)
+       returning id, email, role`,
+      [addr, hash, role]
+    )).rows[0];
+    // provision the timesheet profile
+    await client.query(
+      `insert into public.ts_profiles
+         (id,email,full_name,phone,role,employer,client,job_title,employee_code,country,manager_name,manager_email)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,coalesce($10,'US'),$11,$12)
+       on conflict (id) do nothing`,
+      [u.id, addr, meta.full_name || "", meta.phone || null, role, meta.employer || null,
+       meta.client || null, meta.job_title || null, meta.employee_code || null,
+       meta.country || "US", meta.manager_name || null, meta.manager_email || null]
+    );
+    await client.query("commit");
+  } catch (e) {
+    await client.query("rollback").catch(() => {});
+    console.error("[auth] signup failed, nothing was created:", e?.message || e);
+    return NextResponse.json(
+      { error: "Couldn't create the account. Please try again." },
+      { status: 500 }
+    );
+  } finally {
+    client.release();
+  }
   if (isFirstUser) console.warn(`[auth] bootstrap: first account ${addr} created as ADMIN`);
 
   await setSessionCookie(await signSession(u));

@@ -3,6 +3,11 @@ import { currentUser } from "@/lib/aws/auth";
 import { pool } from "@/lib/aws/db";
 import { audit } from "@/lib/aws/audit";
 import { clientIp } from "@/lib/aws/ratelimit";
+// THE hours formula and its bounds — imported, not re-typed. This route used to
+// carry its own copy of the summation, which is how it also carried its own copy
+// of the missing sanity check: days of [{regular:100},{regular:-40}] netted to a
+// plausible-looking 60h and were filed against an employee who never saw them.
+import { deriveTotalsStrict, HoursRangeError } from "@/lib/hours";
 
 export const runtime = "nodejs";
 
@@ -34,25 +39,6 @@ export const runtime = "nodejs";
 // export (app/api/admin/export/route.js) additionally refuses to emit a CSV if
 // any employee somehow ends up with two approved rows in one period.
 // ---------------------------------------------------------------------------
-
-// THE hours formula, byte-for-byte the same summation as lib/engine.js rollup()
-// and lib/aws/data.js deriveTotals(). `other` (sick/vacation/holiday) is paid
-// time: it counts toward the total but must NOT inflate billable regular.
-function deriveTotals(days) {
-  let regular = 0, overtime = 0, other = 0, daysWorked = 0;
-  for (const d of Array.isArray(days) ? days : []) {
-    const reg = Number(d?.regular) || 0;
-    const ot = Number(d?.overtime) || 0;
-    const oth = Number(d?.other) || 0;
-    regular += reg; overtime += ot; other += oth;
-    if (reg + ot + oth > 0) daysWorked += 1;
-  }
-  const r2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
-  return {
-    regular: r2(regular), overtime: r2(overtime), other: r2(other),
-    total: r2(regular + overtime + other), daysWorked,
-  };
-}
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const bad = (msg, status = 400) => NextResponse.json({ error: msg }, { status });
@@ -86,7 +72,13 @@ export async function POST(request) {
   const days = body.days;
   if (days.length > 40) return bad("too many day entries for one month");
 
-  const totals = deriveTotals(days);
+  let totals;
+  try {
+    totals = deriveTotalsStrict(days);
+  } catch (e) {
+    if (e instanceof HoursRangeError) return bad(e.problems.join(" "));
+    throw e;
+  }
   if (totals.total <= 0) {
     return bad("this timesheet has no hours on any day — nothing to file");
   }
@@ -167,10 +159,39 @@ export async function POST(request) {
       )).rows[0]?.id || null;
     }
 
-    // ---- baseline timesheet: FILL IN WHAT IS MISSING, never clobber --------
-    // ts_timesheets is the employee's own baseline (file_id, ai_* metadata,
-    // their extracted day grid). Overwriting it from here would destroy the
-    // provenance of a document the employee uploaded themselves.
+    // ---- baseline timesheet: THE HOURS MUST FOLLOW THE FILING OF RECORD ----
+    // ts_timesheets is unique on (user_id, year, month) — it is the ONE row for
+    // this employee-month, and its `days` / monthly_* are hours. lib/aws/data.js
+    // treats it as a MONEY_TABLE and re-derives those columns from `days` on
+    // every write for exactly that reason.
+    //
+    // This used to refresh only the identity columns on conflict, on the theory
+    // that the row was "the employee's own baseline" and must never be
+    // clobbered. That left the row asserting the hours of a filing that this
+    // very transaction has just SUPERSEDED: a re-filing correcting 180h down to
+    // 40h wrote 40h into ts_employee_edits (what payroll pays) and left 180h
+    // over a 22-day grid sitting here. Nothing pays this table, but the
+    // employee's dashboard resumes an unfinished timesheet FROM row.days
+    // (components/DashboardClient.js resumeDraft), so the stale grid came back
+    // as a live resume card offering 180h for a month already approved at 40h —
+    // and submitting it filed a competing row against an approved period.
+    //
+    // So the hours columns now follow the filing: derived, in this request, from
+    // the same `days` written to ts_employee_edits below. Provenance is NOT lost
+    // — every previous version survives in the append-only ts_employee_edits and
+    // ts_admin_edits rows, which is where an auditor reads history from.
+    //   * identity columns still only FILL IN blanks — an admin filing hours
+    //     must not rename an employee or move them to another client;
+    //   * file_id: the document attached to THIS filing wins if one was given,
+    //     otherwise the existing one is kept, so the row never points at the
+    //     superseded filing's document while carrying the new filing's hours;
+    //   * ai_status/ai_confidence: these hours were typed by an admin, not read
+    //     from a document, so an extraction confidence left over from a
+    //     different day grid would be a lie about the numbers now in the row;
+    //   * draft: the period is filed. Leaving a draft blob here re-offers the
+    //     employee a resume card whose hours are now these hours — and lets them
+    //     submit against an approved period. The mandatory note on this filing is
+    //     the record of why their in-progress version was replaced.
     const bodyFields = (body.fields && typeof body.fields === "object") ? body.fields : {};
     const tsId = (await client.query(
       `insert into public.ts_timesheets as t
@@ -179,10 +200,18 @@ export async function POST(request) {
           monthly_regular, monthly_overtime, monthly_total, days_worked, ai_status)
        values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,'{}'::jsonb,$10,$11,$12,$13,'manual')
        on conflict (user_id, year, month) do update
-          set employee_name = coalesce(t.employee_name, excluded.employee_name),
-              employee_id   = coalesce(t.employee_id,   excluded.employee_id),
-              client        = coalesce(t.client,        excluded.client),
-              file_id       = coalesce(t.file_id,       excluded.file_id)
+          set employee_name    = coalesce(t.employee_name, excluded.employee_name),
+              employee_id      = coalesce(t.employee_id,   excluded.employee_id),
+              client           = coalesce(t.client,        excluded.client),
+              file_id          = coalesce(excluded.file_id, t.file_id),
+              days             = excluded.days,
+              monthly_regular  = excluded.monthly_regular,
+              monthly_overtime = excluded.monthly_overtime,
+              monthly_total    = excluded.monthly_total,
+              days_worked      = excluded.days_worked,
+              ai_status        = excluded.ai_status,
+              ai_confidence    = null,
+              draft            = null
        returning id`,
       [employeeUserId, fileId, month, year,
        prof.full_name || bodyFields.employee_name || null,

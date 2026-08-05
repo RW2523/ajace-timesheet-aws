@@ -169,7 +169,16 @@ alter table public.ts_employee_edits
   -- use what the employee submitted". Payroll reads coalesce(final_*, submitted).
   add column if not exists final_regular  numeric,
   add column if not exists final_overtime numeric,
-  add column if not exists final_total    numeric;
+  add column if not exists final_total    numeric,
+  -- The DAY GRID the corrected figures above were summed from. `days` stays the
+  -- employee's submission, verbatim and untouched; this is the admin's replacement
+  -- for it. Without it the paid number had no evidence in the row — and, worse,
+  -- the console reloaded the employee's stale grid on the next visit, so a second
+  -- correction was computed from the pre-correction hours and silently reverted
+  -- the first. Null means "no day-level correction" (never corrected, or a
+  -- summary-only document corrected through final_regular/final_overtime).
+  -- Everything that reads a corrected grid must read coalesce(final_days, days).
+  add column if not exists final_days     jsonb;
 
 alter table public.ts_employee_edits drop constraint if exists ts_employee_edits_status_check;
 alter table public.ts_employee_edits add constraint ts_employee_edits_status_check
@@ -256,3 +265,23 @@ create table if not exists public.ts_audit_log (
 );
 create index if not exists ts_audit_log_at_idx on public.ts_audit_log(at desc);
 create index if not exists ts_audit_log_subject_idx on public.ts_audit_log(subject_id, at desc);
+
+-- The SAME rule, one level down: a payroll record must not be destroyed by
+-- deleting its PARENT either. ts_employee_edits.timesheet_id and
+-- ts_admin_edits.timesheet_id were created ON DELETE CASCADE, so removing the
+-- ts_timesheets row took the approved submissions and the admin audit trail
+-- with it and left no trace — the append-only guarantee on those two tables
+-- only ever covered a direct DELETE against them. lib/aws/data.js no longer
+-- lets any client delete a ts_timesheets row; this makes the database refuse
+-- it as well, loudly, whatever code asks. Deleting a timesheet that has no
+-- payroll rows still works.
+do $$
+begin
+  alter table public.ts_employee_edits drop constraint if exists ts_employee_edits_timesheet_id_fkey;
+  alter table public.ts_employee_edits add  constraint ts_employee_edits_timesheet_id_fkey
+    foreign key (timesheet_id) references public.ts_timesheets(id) on delete restrict;
+
+  alter table public.ts_admin_edits    drop constraint if exists ts_admin_edits_timesheet_id_fkey;
+  alter table public.ts_admin_edits    add  constraint ts_admin_edits_timesheet_id_fkey
+    foreign key (timesheet_id) references public.ts_timesheets(id) on delete restrict;
+end $$;

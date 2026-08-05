@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/api/server";
+import { signAiVerdict } from "@/lib/aws/jwt";
 import { processUpload, buildCalendar, rollup } from "@/lib/engine";
 
 export const maxDuration = 300; // allow long LLM runs
@@ -46,7 +47,7 @@ export async function POST(request) {
     process.env.DIRECT_SERVERLESS === "true" ||
     (!!process.env.VERCEL && !process.env.ENGINE_URL);
   if (serverless) {
-    return processServerless(file, month, year);
+    return processServerless(file, month, year, user.id);
   }
 
   try {
@@ -62,6 +63,13 @@ export async function POST(request) {
       llm_used: result.llm_used,
       flow: result.flow || flow,
       review_status: result.review_status || null,
+      // Signed receipt for the verdict above. The browser carries the verdict
+      // to /api/data, so /api/data believes the RECEIPT, not the browser.
+      ai_stamp: await signAiVerdict({
+        userId: user.id,
+        reviewStatus: result.review_status || null,
+        flow: result.flow || flow,
+      }),
       // Manager approval, lifted to the top level so the client doesn't have to
       // dig for it. null = this flow never looked (the Python engine has no
       // approval block yet) — which the UI must treat as "ask the employee",
@@ -80,7 +88,7 @@ export async function POST(request) {
 }
 
 // -- Direct++ inside this function: no Python engine, no server --------------
-async function processServerless(file, month, year) {
+async function processServerless(file, month, year, userId) {
   const fileName = file.name || "upload";
   try {
     const { buildModelInput } = await import("@/lib/directpp/input.js");
@@ -111,6 +119,12 @@ async function processServerless(file, month, year) {
       llm_used: true,
       flow: "direct_serverless",
       review_status: employee.review_status,
+      // Signed receipt — see the note on the other branch.
+      ai_stamp: await signAiVerdict({
+        userId,
+        reviewStatus: employee.review_status || null,
+        flow: "direct_serverless",
+      }),
       approval: employee.approval || null,
       timings: { input_ms: inputMs,
                  model_ms: timings?.model_ms ?? null,

@@ -3,6 +3,14 @@ import { currentUser } from "@/lib/aws/auth";
 import { pool } from "@/lib/aws/db";
 import { audit } from "@/lib/aws/audit";
 import { clientIp } from "@/lib/aws/ratelimit";
+// THE hours formula and its bounds (lib/hours.js), imported rather than re-typed.
+// `deriveTotals` is the TOLERANT sum, used only to READ what is already stored —
+// a row written before the bounds existed must stay openable so an admin can
+// correct it. `deriveTotalsStrict` is what a CORRECTION goes through, because a
+// final_total is the number that gets paid.
+import {
+  deriveTotals, deriveTotalsStrict, checkSummaryTotals, HoursRangeError, round2,
+} from "@/lib/hours";
 
 export const runtime = "nodejs";
 
@@ -24,6 +32,17 @@ export const runtime = "nodejs";
 //   * `summaryTotals` — regular + overtime only, and ONLY for a submission that
 //     genuinely has no per-day breakdown (a document that stated weekly or
 //     monthly summary figures). `total` is still computed, never accepted.
+//
+// AND THE GRID IT WAS DERIVED FROM IS KEPT, in final_days. It used to be summed
+// and thrown away: the row that says "pay 20 hours" still held the employee's
+// original grid summing to 4, so the paid number had no evidence behind it. That
+// is not only an audit hole. The console reloads the row's grid every time the
+// submission is opened, so the NEXT correction started from the employee's
+// pre-correction hours and silently reverted the first one — a correction from
+// 4h to 20h, then a +2h touch-up, paid 6h instead of 22h, with no error shown.
+// `days` still holds the employee's submission verbatim (it is their record, and
+// it is append-only); final_days is the admin's replacement for it, exactly as
+// final_total is the admin's replacement for the submitted total.
 const ALLOWED = new Set(["submitted", "approved", "rejected"]);
 
 // Legal transitions. Previously any status could flip to any other with no
@@ -34,25 +53,6 @@ const NEXT = {
   rejected: new Set(["approved", "submitted"]),
   superseded: new Set(),
 };
-
-// THE hours formula, byte-for-byte the same summation as lib/engine.js rollup()
-// and lib/aws/data.js deriveTotals(). `other` (sick/vacation/holiday) is paid
-// time: it counts toward the total but must NOT inflate billable regular.
-function deriveTotals(days) {
-  let regular = 0, overtime = 0, other = 0, daysWorked = 0;
-  for (const d of Array.isArray(days) ? days : []) {
-    const reg = Number(d?.regular) || 0;
-    const ot = Number(d?.overtime) || 0;
-    const oth = Number(d?.other) || 0;
-    regular += reg; overtime += ot; other += oth;
-    if (reg + ot + oth > 0) daysWorked += 1;
-  }
-  const r2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
-  return {
-    regular: r2(regular), overtime: r2(overtime), other: r2(other),
-    total: r2(regular + overtime + other), daysWorked,
-  };
-}
 
 const bad = (msg, status = 400, extra = {}) =>
   NextResponse.json({ error: msg, ...extra }, { status });
@@ -102,7 +102,17 @@ export async function POST(request) {
 
     let finals = null;
     if (Array.isArray(days)) {
-      const t = deriveTotals(days);
+      let t;
+      try {
+        // A corrected day grid is held to the same bounds as a submitted one:
+        // final_* IS the paid number, so this is the last place an impossible
+        // figure could enter payroll.
+        t = deriveTotalsStrict(days);
+      } catch (e) {
+        if (!(e instanceof HoursRangeError)) throw e;
+        await client.query("rollback");
+        return bad(e.problems.join(" "), 400);
+      }
       if (t.total === 0 && summaryOnly && confirmZero !== true) {
         await client.query("rollback");
         return bad(
@@ -111,7 +121,9 @@ export async function POST(request) {
           409, { summaryOnly: true }
         );
       }
-      finals = { regular: t.regular, overtime: t.overtime, total: t.total };
+      // The grid is kept with the totals it produced, so the row can always show
+      // its own arithmetic and the next correction starts from these hours.
+      finals = { regular: t.regular, overtime: t.overtime, total: t.total, days };
     } else if (summaryTotals && typeof summaryTotals === "object") {
       if (!summaryOnly) {
         await client.query("rollback");
@@ -119,13 +131,18 @@ export async function POST(request) {
       }
       const reg = Number(summaryTotals.regular);
       const ot = Number(summaryTotals.overtime);
-      if (!Number.isFinite(reg) || !Number.isFinite(ot) || reg < 0 || ot < 0) {
+      // Non-negative was already checked here; the UPPER bound was not, so a
+      // summary correction could still pay a million hours.
+      const problems = checkSummaryTotals(summaryTotals);
+      if (problems.length) {
         await client.query("rollback");
-        return bad("corrected regular and overtime must be non-negative numbers");
+        return bad(problems.join(" "));
       }
-      const r2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
-      // `total` is computed, never taken from the client.
-      finals = { regular: r2(reg), overtime: r2(ot), total: r2(reg + ot) };
+      // `total` is computed, never taken from the client. `days: null` is
+      // deliberate and is WRITTEN, not skipped: this document genuinely has no
+      // day breakdown, and a grid left behind by an earlier correction would
+      // leave the row claiming evidence that no longer adds up to what it pays.
+      finals = { regular: round2(reg), overtime: round2(ot), total: round2(reg + ot), days: null };
     }
     corrected = finals !== null;
 
@@ -148,6 +165,11 @@ export async function POST(request) {
               final_regular  = case when $5::boolean then $6::numeric else final_regular  end,
               final_overtime = case when $5::boolean then $7::numeric else final_overtime end,
               final_total    = case when $5::boolean then $8::numeric else final_total    end,
+              -- Written in the SAME case as the totals above, off the SAME
+              -- derived object, so the paid number and the grid it was summed
+              -- from can never drift apart: a correction sets all four, or it
+              -- touches none of them.
+              final_days     = case when $5::boolean then $10::jsonb   else final_days   end,
               reviewed_by    = $9::uuid,
               reviewed_at    = now()
         where id = $1
@@ -155,7 +177,10 @@ export async function POST(request) {
                   final_regular, final_overtime, final_total, reviewed_at`,
       [editId, status || null, overwriteNote, note ?? null,
        corrected, finals?.regular ?? null, finals?.overtime ?? null, finals?.total ?? null,
-       user.id]
+       user.id,
+       // node-pg encodes a top-level JS array as a Postgres array literal, which
+       // jsonb rejects — the grid must be stringified (same rule as data.js).
+       finals?.days ? JSON.stringify(finals.days) : null]
     )).rows[0];
 
     // ---- at most ONE approved row per employee+period -----------------------

@@ -724,17 +724,26 @@ function Req() {
 function SubmissionDetail({ edit, profile, adminProfile, reviewer, sourceFile, api, onClose, onSaved }) {
   // `days` is the heavy part of a submission (one entry per calendar day), so
   // the list query no longer carries it. Fetch it for just this submission.
-  const [days, setDays] = useState(edit.days || []);
-  const [baseDays, setBaseDays] = useState(JSON.stringify(edit.days || []));
-  const [loadingDays, setLoadingDays] = useState(!edit.days);
+  //
+  // THE GRID OF RECORD IS `final_days` ONCE A CORRECTION EXISTS. `days` is the
+  // employee's original submission and never changes; final_days is the grid the
+  // paid final_total was summed from (/api/admin/review). Showing `days` after a
+  // correction put the pre-correction hours back on screen under a corrected
+  // total — and, because this grid is exactly what the next save posts back, the
+  // next correction was summed from those stale hours and silently reverted the
+  // previous one.
+  const gridOf = (e) => (Array.isArray(e?.final_days) ? e.final_days : e?.days);
+  const [days, setDays] = useState(gridOf(edit) || []);
+  const [baseDays, setBaseDays] = useState(JSON.stringify(gridOf(edit) || []));
+  const [loadingDays, setLoadingDays] = useState(!gridOf(edit));
   useEffect(() => {
-    if (edit.days) return;
+    if (gridOf(edit)) return;
     let alive = true;
-    api.from("ts_employee_edits").select("days,questionnaire").eq("id", edit.id).single()
+    api.from("ts_employee_edits").select("days,final_days,questionnaire").eq("id", edit.id).single()
       .then(({ data }) => {
         if (!alive) return;
-        setDays(data?.days || []);
-        setBaseDays(JSON.stringify(data?.days || []));
+        setDays(gridOf(data) || []);
+        setBaseDays(JSON.stringify(gridOf(data) || []));
         setLoadingDays(false);
       });
     return () => { alive = false; };
@@ -750,12 +759,21 @@ function SubmissionDetail({ edit, profile, adminProfile, reviewer, sourceFile, a
   // from days would wrongly show 0. Fall back to the totals stored at
   // extraction time, and never clobber them with zeros on an admin save.
   const dayR = rollup(days);
-  const stored = edit.fields?.totals || {};
-  const summaryOnly = !loadingDays && dayR.total === 0 && Number(stored.total) > 0;
+  const submitted = edit.fields?.totals || {};
+  const summaryOnly = !loadingDays && dayR.total === 0 && Number(submitted.total) > 0;
+  // A summary-only document has no grid to roll up, so its figures come from the
+  // row — and the row's figures are the CORRECTED ones when a correction exists.
+  // Reading only fields.totals here showed the admin the employee's original
+  // numbers on a submission payroll was already paying a corrected amount for,
+  // and seeded the correction box with them.
+  const stored = edit.final_total != null
+    ? { regular: edit.final_regular, overtime: edit.final_overtime, total: edit.final_total,
+        daysWorked: submitted.daysWorked ?? submitted.days_worked }
+    : submitted;
   const storedView = {
-    regular: stored.regular ?? stored.total ?? 0,
-    overtime: stored.overtime ?? 0,
-    total: stored.total ?? 0,
+    regular: Number(stored.regular ?? stored.total ?? 0),
+    overtime: Number(stored.overtime ?? 0),
+    total: Number(stored.total ?? 0),
     daysWorked: stored.daysWorked ?? stored.days_worked ?? "—",
   };
   // The day grid arrives in a second request. Until it does, `days` is empty and

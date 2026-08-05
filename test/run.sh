@@ -12,7 +12,7 @@
 # dropped at the end, and the suite refuses to run without one.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SUITE=(data-layer review-flow derived-totals derivation-escape draft-resume)
+SUITE=(data-layer review-flow derived-totals derivation-escape draft-resume corrected-grid fields-provenance)
 
 # Syntax gate first: needs no database, so it runs even when the DB checks
 # below would abort. Do NOT replace this with `node --check`: on Node >= 20 a
@@ -57,7 +57,31 @@ run_suite() {  # $1 = connection string, $2 = "disable" for plaintext, else TLS
   return $rc
 }
 
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+# Is there a USABLE docker? The probe is bounded on purpose. With the Docker
+# CLI installed but the daemon stopped (Docker Desktop quit, colima down),
+# `docker info` does not fail — it blocks indefinitely waiting for a socket
+# that will never answer. Unbounded, that hung this script before a single
+# test ran, so the suite looked like it was working when nothing had executed.
+# A timeout is treated as "no docker", which falls through to the scratch
+# database path below: the safe direction, because that path still runs every
+# test rather than skipping any.
+docker_usable() {
+  command -v docker >/dev/null 2>&1 || return 1
+  docker info >/dev/null 2>&1 &
+  local probe=$! waited=0
+  while [ "$waited" -lt "${DOCKER_PROBE_TIMEOUT:-10}" ]; do
+    if ! kill -0 "$probe" 2>/dev/null; then
+      wait "$probe"; return $?          # daemon answered: its own exit code decides
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+  kill -9 "$probe" 2>/dev/null || true
+  wait "$probe" 2>/dev/null || true
+  echo "    docker CLI present but the daemon did not answer in ${DOCKER_PROBE_TIMEOUT:-10}s — using the scratch database instead" >&2
+  return 1
+}
+
+if docker_usable; then
   PORT="${PGPORT_TEST:-55432}"; NAME=ts-test-pg
   cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; }
   trap cleanup EXIT
@@ -84,6 +108,12 @@ fi
 BASE="${DATABASE_URL%/*}"                 # everything up to the db name
 LIVE_DB="${DATABASE_URL##*/}"
 SCRATCH="ts_test_$$"
+# This path defaults to TLS because the server it was written for is RDS, which
+# refuses plaintext. A caller pointing it at a LOCAL plaintext cluster opts out
+# with PGSSL=disable in the environment. Read once, HERE, because run_suite
+# rewrites PGSSL on every call. Note the `-` not `:-`: an empty PGSSL must NOT
+# count as "disable", for the reason spelled out inside run_suite.
+CALLER_PGSSL="${PGSSL-}"
 # Kept separate because run_suite re-exports DATABASE_URL to point at the
 # scratch database: dropping it through that connection would fail with
 # "cannot drop the currently open database" and leak the scratch DB on RDS.
@@ -103,5 +133,6 @@ done
 
 psql "$ADMIN_URL" -q -c "create database $SCRATCH" >/dev/null
 psql "$BASE/$SCRATCH" -v ON_ERROR_STOP=1 -q -f "$ROOT/deploy/db/schema.sql"
-# No second argument => TLS, which RDS requires.
-run_suite "$BASE/$SCRATCH"
+# Empty second argument => TLS, which RDS requires. Only a literal "disable",
+# set by the caller before this script ran, selects plaintext.
+run_suite "$BASE/$SCRATCH" "$CALLER_PGSSL"
