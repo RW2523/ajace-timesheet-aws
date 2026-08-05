@@ -93,8 +93,15 @@ if docker_usable; then
     docker exec "$NAME" pg_isready -U postgres -d timesheet >/dev/null 2>&1 && break
     sleep 1
   done
-  PGPASSWORD=postgres psql -h 127.0.0.1 -p "$PORT" -U postgres -d timesheet \
-    -v ON_ERROR_STOP=1 -q -f "$ROOT/deploy/db/schema.sql"
+  # Apply the schema through the CONTAINER's psql, not the host's.
+  #
+  # The host needs no postgresql-client at all this way, which is the whole
+  # point of the docker path. A DGX Spark with docker up and no psql installed
+  # got as far as starting the container and then died on
+  # "test/run.sh: line 96: psql: command not found" — the suite looked like it
+  # was running and had in fact tested nothing past the pure-JS files.
+  docker exec -i "$NAME" psql -U postgres -d timesheet -v ON_ERROR_STOP=1 -q \
+    < "$ROOT/deploy/db/schema.sql"
   run_suite "postgresql://postgres:postgres@127.0.0.1:$PORT/timesheet" disable
   exit $?
 fi
