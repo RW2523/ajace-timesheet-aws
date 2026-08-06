@@ -69,6 +69,10 @@ export async function POST(request) {
         userId: user.id,
         reviewStatus: result.review_status || null,
         flow: result.flow || flow,
+        // On the receipt so ai_confidence can be stored from a SIGNED value.
+        // /api/admin/timesheet has no other honest source for it: the browser
+        // is the only thing that saw the extraction.
+        confidence: employee?.confidence ?? null,
       }),
       // Manager approval, lifted to the top level so the client doesn't have to
       // dig for it. null = this flow never looked (the Python engine has no
@@ -124,6 +128,7 @@ async function processServerless(file, month, year, userId) {
         userId,
         reviewStatus: employee.review_status || null,
         flow: "direct_serverless",
+        confidence: employee.confidence ?? null,
       }),
       approval: employee.approval || null,
       timings: { input_ms: inputMs,

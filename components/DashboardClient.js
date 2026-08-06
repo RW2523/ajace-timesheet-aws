@@ -13,6 +13,19 @@ import { holidaysInMonth } from "@/lib/holidays";
 import { buildCalendar, rollup } from "@/lib/engine";
 import { emptyWeekdays, fillEmptyWeekdays } from "@/lib/fill";
 import { validateTimesheet } from "@/lib/validate";
+import TimesheetTargetPicker from "@/components/TimesheetTargetPicker";
+import { EMPTY_PICK, resolveTarget, nameKey } from "@/lib/roster";
+// The SAME predicates the server enforces with. roles.js is pure, so it bundles
+// into a client component untouched — re-typing `role === "admin"` here is how a
+// screen ends up disagreeing with the route it posts to.
+import { canFileForOthers, canReview } from "@/lib/aws/roles";
+// WHERE THESE HOURS GO, and whose folder the document lands in. Both decisions
+// are derived from the resolved target's ID, in a JSX-free module a test can
+// execute — see lib/filing.js for why sending an on-behalf filing to /api/data
+// is a silent 200 that pays the wrong person.
+import {
+  ADMIN_ROUTE, isSelfFilingTarget, storageKeyFor, sameStoredFile,
+} from "@/lib/filing";
 import {
   applyToDate, clearWorkedHours, restoreWorkedHours,
   setWorkedHours as setWorkedHoursOn, workedHoursOf,
@@ -48,6 +61,98 @@ export default function DashboardClient({ profile, submissions = [] }) {
   // not configured (e.g. on Vercel), the app degrades to manual entry only.
   const AI_ENABLED = ["true", "1"].includes(process.env.NEXT_PUBLIC_AI_ENABLED);
 
+  // =========================================================================
+  // WHO IS THIS TIMESHEET FOR?
+  //
+  // This screen used to file for exactly one person — whoever was signed in —
+  // and an admin filing on somebody's behalf had a separate, AI-less, day-by-day
+  // modal in the console. Two filing flows meant one of them was always the
+  // worse one, and it was the one used for the people who cannot file for
+  // themselves. There is now ONE flow, and this is the control that says whose
+  // payroll record it writes to.
+  //
+  // TWO GATES, not one. `canFile` hides the picker, AND the resolved target is
+  // clamped to SELF for anyone without the right — so a stale `who` in state
+  // cannot outlive a demotion or a re-render. Neither is the real control:
+  // currentUser() re-reads the role from the database on every request and fails
+  // closed to 'employee', so /api/admin/timesheet refuses regardless of what
+  // this component believes.
+  const canFile = canFileForOthers(profile);
+  // Default MYSELF, not EMPTY_PICK's "other": a tab headed "My Timesheet" that
+  // opens pointed at nobody is wrong, and every employee-path user is self.
+  // EMPTY_PICK itself is deliberately NOT changed — that is the picker's own
+  // contract (test/target-picker-render.test.cjs asserts it); which end of it
+  // this host starts from is a host decision, and it belongs here.
+  const [who, setWho] = useState({ ...EMPTY_PICK, mode: "self" });
+  // Everyone with a payroll record. Fetched client-side and ONLY when canFile:
+  // an ordinary employee's dashboard payload must not contain a roster at all.
+  // /api/admin/people is already gated on canCreatePeople and already filters
+  // out the deactivated.
+  const [people, setPeople] = useState([]);
+  // Carried verbatim from the console's own rule: HR-role people stay filable
+  // (they have payroll records like anyone else) and deactivated leavers stay
+  // off the list, because filing for them is refused downstream anyway.
+  const roster = useMemo(
+    () => people.filter((p) => p.role !== "admin" && p.active !== false),
+    [people]
+  );
+  // What "myself" resolves to when there is no picker on screen. Shaped exactly
+  // like resolveTarget's self branch so every reader downstream sees one type.
+  const selfTarget = useMemo(() => ({
+    kind: "self", id: profile.id, name: profile.full_name || profile.email || "me",
+    email: profile.email || null, client: profile.client || "",
+  }), [profile]);
+  const resolvedTarget = useMemo(
+    () => resolveTarget(who, { roster, people, self: profile }),
+    [who, roster, people, profile]
+  );
+  const target = canFile ? resolvedTarget : selfTarget;
+
+  // THE RULE, DERIVED ONCE, FROM THE RESOLVED ID — never from `who.mode`.
+  // isSelfFilingTarget is the same case-folded comparison
+  // app/api/admin/timesheet/route.js re-derives server-side, so the screen and
+  // the route cannot disagree about whose hours these are. A null target (the
+  // admin has chosen "someone else" but not yet said who) is NOT self: the
+  // screen goes into on-behalf mode immediately, which is what they asked for,
+  // and submitting is blocked until a person is actually chosen.
+  const forSelf = isSelfFilingTarget(target?.id, uid);
+
+  // "Is this a different payroll SUBJECT?" — deliberately coarser than
+  // targetKey(). A person who does not exist yet has no id and their details
+  // are still being typed, so correcting a typo'd address is not a change of
+  // subject and must not wipe an extraction that took minutes to produce.
+  const subjectKey = target
+    ? (target.kind === "new" ? "new" : `${target.kind}:${String(target.id).toLowerCase()}`)
+    : (who.mode === "new" ? "new" : `unchosen:${who.mode}`);
+
+  // The roster the picker searches. Only fetched for someone who may use it.
+  useEffect(() => {
+    if (!canFile) return;
+    let alive = true;
+    (async () => {
+      try {
+        const res = await fetch("/api/admin/people");
+        if (!res.ok) return;               // 403 after a demotion: no roster, no picker
+        const j = await res.json();
+        if (alive && Array.isArray(j.people)) setPeople(j.people);
+      } catch { /* the picker degrades to "add a new person"; nothing breaks */ }
+    })();
+    return () => { alive = false; };
+  }, [canFile]);
+
+  // /dashboard?for=other — the signpost that replaces the console's
+  // "+ Add a timesheet" button. It sets the MODE only: a non-identifying enum.
+  // An employee id never appears in a URL; it is only ever chosen in the
+  // dropdown. Read from location rather than useSearchParams() so this needs no
+  // Suspense boundary and cannot change how the route is rendered.
+  useEffect(() => {
+    if (!canFile || typeof window === "undefined") return;
+    if (new URLSearchParams(window.location.search).get("for") === "other") {
+      setWho((w) => ({ ...w, mode: "other" }));
+    }
+  }, [canFile]);
+  // =========================================================================
+
   const [period, setPeriod] = useState(defaultPeriod());
   const { month, year } = period;
   // defaultPeriod() is a GUESS (lib/month.js: prior month until the 10th, then
@@ -71,9 +176,15 @@ export default function DashboardClient({ profile, submissions = [] }) {
 
   // What (if anything) this employee has already submitted for the chosen month.
   // Superseded rows are earlier attempts that a later submission replaced.
+  //
+  // The `s.user_id === uid` clause is the client half of the scope
+  // app/dashboard/page.js now applies server-side. Both, not either: this card
+  // states a person's filed hours under the heading "My Timesheet", and a
+  // privileged session used to be handed everybody's rows to build it from.
   const mine = useMemo(
-    () => submissions.filter((s) => s.year === year && s.month === month),
-    [submissions, year, month]
+    () => submissions.filter(
+      (s) => s.year === year && s.month === month && (!s.user_id || s.user_id === uid)),
+    [submissions, year, month, uid]
   );
   const currentSubmission = mine.find((s) => s.status !== "superseded") || null;
   const holidays = useMemo(() => holidaysInMonth(year, month), [year, month]);
@@ -138,10 +249,33 @@ export default function DashboardClient({ profile, submissions = [] }) {
   // a freshly opened form covered in red is noise, not guidance.
   const [showErrors, setShowErrors] = useState(false);
 
+  // ---------- filing on somebody's behalf: the note, and the 409 handshake ---
+  // The note is the only human record of why hours nobody self-reported exist,
+  // so /api/admin/timesheet hard-400s an on-behalf filing without one. It is
+  // deliberately NOT demanded for your own hours: an employee submitting their
+  // own month through /api/data explains nothing either, and requiring a
+  // justification for your own hours only teaches people to type "." to get
+  // past it. This matches the route rather than being stricter than it.
+  const [note, setNote] = useState("");
+  // Rows the target already has for this month, as reported by the route's 409.
+  // The prompt is the ONLY code path in the product that can send
+  // supersede:true; without it, filing over an existing row is a dead end.
+  const [conflict, setConflict] = useState(null);
+  // The server's verdicts about a NEW person, each about ONE field. They come
+  // back at submit time, so they are rendered on the picker's own fields — a
+  // message about an address in a banner at the other end of the page is a
+  // message the admin cannot act on.
+  const [emailErr, setEmailErr] = useState("");
+  const [codeErr, setCodeErr] = useState("");
+  const [sameNameFromServer, setSameNameFromServer] = useState(null);
+
   // live validation + totals
+  // `onBehalf` drops the self-attestation questions and NOTHING else — see the
+  // block comment on validateTimesheet for the exact edge and why it is safe.
   const validation = useMemo(
-    () => validateTimesheet({ fields, calendar, questionnaire: q, holidayWork, holidays }),
-    [fields, calendar, q, holidayWork, holidays]
+    () => validateTimesheet({ fields, calendar, questionnaire: q, holidayWork, holidays,
+                              onBehalf: !forSelf }),
+    [fields, calendar, q, holidayWork, holidays, forSelf]
   );
   const totals = {
     regular: validation.calReg, overtime: validation.calOt,
@@ -152,11 +286,69 @@ export default function DashboardClient({ profile, submissions = [] }) {
 
   // Signature of everything submit() sends. Same inputs, same order, so it can
   // be compared byte-for-byte against the snapshot taken at the last submit.
+  // `subjectKey` and `note` are in it because on the on-behalf path they are
+  // part of what gets filed: re-pointing the picker at a different person must
+  // re-enable Submit, not leave it reading "Submitted ✓" about somebody else.
   const currentSig = useMemo(
-    () => JSON.stringify({ fields, calendar, q, holidayWork }),
-    [fields, calendar, q, holidayWork]
+    () => JSON.stringify({ subjectKey, fields, calendar, q, holidayWork, note }),
+    [subjectKey, fields, calendar, q, holidayWork, note]
   );
   const alreadySubmitted = submittedSig != null && submittedSig === currentSig;
+
+  // ---- what will happen to this row when it lands, and what blocks it ------
+  // Mirrored from the route's own status rule (`const approved = !forSelf &&
+  // canReview(user)`), using the same predicate module — telling an HR user
+  // their filing is "approved and payable" when it is queued for an admin is a
+  // lie about somebody's wages.
+  //   admin, for someone else -> approved and payable now
+  //   HR, for someone else    -> submitted, waits for an admin
+  //   anyone, for themselves  -> submitted; nobody approves their own wages
+  const willBeApproved = !!target && !forSelf && canReview(profile);
+  const noteRequired = !forSelf;
+  const noteOk = !noteRequired || note.trim().length >= 3;
+  // What stops a submit, in page order. validate.js owns the hours and the
+  // answers; these two are about WHOSE hours they are, which validate.js has no
+  // business knowing. Rendered as one list so the employee/admin sees one place
+  // to look rather than a banner and a separately-greyed button.
+  const blockers = useMemo(() => {
+    const out = [...validation.errors];
+    if (!target) out.push("Choose who this timesheet is for at the top of the page.");
+    if (noteRequired && !noteOk) {
+      out.push("Say why you are filing this on their behalf — a note is required, " +
+               "and it is the only record of why these hours exist.");
+    }
+    return out;
+  }, [validation.errors, target, noteRequired, noteOk]);
+  const canSubmit = blockers.length === 0;
+
+  // "This document names somebody else." A WARNING, never a refusal: a document
+  // can legitimately carry a client's spelling of a name, initials, or nothing
+  // at all. But an admin filing on paper handed to them across a desk is exactly
+  // the person who can pick up the wrong sheet, and the extraction overwrites
+  // fields.employee_name from the document — so if the two disagree, say so.
+  // The stored record is safe either way: /api/admin/timesheet overwrites
+  // employee_name from the target's own ts_profiles row.
+  // WHY A DOCUMENT CANNOT BE ATTACHED YET, or null when it can.
+  //
+  // The storage key's first segment is the subject's id, and a person being
+  // created by this very filing has no id — so there is no prefix to write to,
+  // and /api/admin/timesheet refuses a file in `new` mode outright. Say so on
+  // the dropzone rather than letting the upload fail at extraction time with
+  // "couldn't save your file", which describes the symptom and not the cause.
+  const attachBlocked =
+    canFile && who.mode === "new"
+      ? "Not available while adding a new person — a document is stored against " +
+        "their record, which doesn’t exist until you file this. File it, then " +
+        "attach the document by filing again over the top."
+      : canFile && !target
+        ? "Choose who this timesheet is for first — a document is stored against " +
+          "the person it belongs to, so there is nowhere to put it yet."
+        : null;
+
+  const nameMismatch = !forSelf && !!target && !!aiMeta &&
+    !!String(fields.employee_name || "").trim() &&
+    nameKey(fields.employee_name) !== nameKey(target.name)
+      ? String(fields.employee_name).trim() : null;
 
   // ---------- per-day hour edits for the holiday Worked / Not-worked toggles --
   // These six functions ARE the PROPS CONTRACT written at the top of
@@ -352,27 +544,40 @@ export default function DashboardClient({ profile, submissions = [] }) {
   }
 
   // ---------- source-document storage (once per picked file, every path) ----
-  const storedRef = useRef(null); // { fileName, month, year, path }
+  const storedRef = useRef(null); // { fileName, month, year, targetId, path }
   // `per` is explicit rather than read from the closure: re-reading a file for a
   // NEWLY chosen month happens in the same tick as setPeriod, when the closure
-  // still holds the old one.
-  async function ensureStored(f, per = period) {
+  // still holds the old one. `tgt` is explicit for the same reason.
+  //
+  // THE KEY'S FIRST SEGMENT IS THE SUBJECT OF THE TIMESHEET, not the uploader.
+  // For a self filing those are the same value; for an on-behalf filing they are
+  // not, and getting it wrong is silent in every direction that matters — see
+  // storageKeyFor() in lib/filing.js. /api/storage/upload permits the write
+  // (owner !== user.id is allowed for whoever may file for others), but that is
+  // a permission gate, not the containment: the containment is
+  // app/api/admin/timesheet/route.js refusing a path that does not start with
+  // `${targetUserId}/`.
+  async function ensureStored(f, per = period, tgt = target) {
     if (!f) return null;
-    // The storage key embeds the period, so the memo has to as well — otherwise
-    // a re-read after a period switch returns the OLD month's key and the
-    // manager opens the wrong month's document.
-    if (storedRef.current?.fileName === f.name &&
-        storedRef.current?.month === per.month &&
-        storedRef.current?.year === per.year) return storedRef.current.path;
+    // The memo carries the period AND the target, so a re-read after either
+    // changes cannot hand back the previous key: the wrong month's document for
+    // the manager, or — worse — employee A's path on employee B's filing, which
+    // the route rejects only AFTER the bytes are in the bucket.
+    if (sameStoredFile(storedRef.current, { fileName: f.name, per, targetId: tgt?.id })) {
+      return storedRef.current.path;
+    }
     const ext = f.name.includes(".") ? f.name.split(".").pop() : "bin";
-    const path = `${uid}/${per.year}-${String(per.month).padStart(2, "0")}/${Date.now()}.${ext}`;
+    // Throws when there is no id to build a prefix from (nobody chosen yet, or a
+    // person who does not exist yet), rather than composing `undefined/…`.
+    const path = storageKeyFor(tgt?.id, per, ext);
     const { error } = await api.storage.from("ts-uploads").upload(path, f, {
       contentType: f.type || "application/octet-stream", upsert: true,
     });
     // Only memoize on success, so a retry actually re-uploads instead of
     // recording a storage_path that points at a key which was never written.
     if (error) throw new Error(`couldn't save your file (${error.message || "upload failed"})`);
-    storedRef.current = { fileName: f.name, month: per.month, year: per.year, path };
+    storedRef.current = { fileName: f.name, month: per.month, year: per.year,
+                          targetId: tgt?.id || null, path };
     return path;
   }
 
@@ -382,6 +587,18 @@ export default function DashboardClient({ profile, submissions = [] }) {
   // re-rendered with yet.
   async function processAI(per = period) {
     if (!file) return;
+    // WHETHER ANY /api/data WRITE HAPPENS AT ALL, decided once, here.
+    //
+    // saveBaseline() writes the ts_files row and the ts_timesheets baseline
+    // through /api/data, where lib/aws/data.js force-overwrites the owner column
+    // to the caller. On an on-behalf filing that would litter the ADMIN's own
+    // record with the employee's hours and document before the real filing ever
+    // ran — and silently rewrite the admin's own monthly_regular / overtime /
+    // total / days_worked, which data.js re-derives from every `days` write.
+    // /api/admin/timesheet writes both rows itself, under the target's id, in
+    // one transaction. So on this path we upload the BYTES (so the route has a
+    // path to attach) and write no rows.
+    const persist = forSelf;
     setProcessing(true);
     setProcessError("");
     setAttachWarn("");
@@ -471,12 +688,14 @@ export default function DashboardClient({ profile, submissions = [] }) {
       // treats as "ask the employee", never as "approved".
       setAiApproval(data.approval || null);
 
-      // 3) persist the AI baseline
-      await saveBaseline({
-        cal, emp, storagePath, file,
-        aiStatus: emp ? "ok" : "failed", confidence: emp?.confidence ?? null,
-        per,
-      });
+      // 3) persist the AI baseline — ONLY when filing your own hours.
+      if (persist) {
+        await saveBaseline({
+          cal, emp, storagePath, file,
+          aiStatus: emp ? "ok" : "failed", confidence: emp?.confidence ?? null,
+          per,
+        });
+      }
       setMode("review");
     } catch (e) {
       setProcessError(String(e.message || e));
@@ -498,7 +717,12 @@ export default function DashboardClient({ profile, submissions = [] }) {
     if (file) {
       try {
         const storagePath = await ensureStored(file);
-        await saveBaseline({ cal: emptyCal, emp: null, storagePath, file, aiStatus: "manual", confidence: null });
+        // Same rule as processAI: no /api/data write when the hours are not the
+        // caller's own. The bytes are in the bucket under the TARGET's prefix;
+        // /api/admin/timesheet records the ts_files row against them.
+        if (forSelf) {
+          await saveBaseline({ cal: emptyCal, emp: null, storagePath, file, aiStatus: "manual", confidence: null });
+        }
       } catch (e) {
         // non-fatal: proceed to manual entry, but say so instead of going quiet
         setAttachWarn(
@@ -615,13 +839,28 @@ export default function DashboardClient({ profile, submissions = [] }) {
 
   // Look for an unfinished draft for the selected period. Scoped by eq filters
   // so this fetches one row, not every month the employee ever touched.
+  //
+  // `.eq("user_id", uid)` IS LOAD-BEARING, and only for a privileged caller.
+  // ts_timesheets carries adminRead (lib/aws/data.js), and buildWhere() drops
+  // the owner predicate on SELECT for an admin — so this query, unscoped,
+  // returned every user's row for the period and `.single()` took rows[0] of an
+  // unordered result. An admin opening /dashboard could therefore be offered an
+  // arbitrary employee's timesheet as their own unfinished draft, and
+  // resumeDraft() then pointed timesheetRef at a foreign row id, after which
+  // every write matched zero rows and returned `error: null` for ever. A no-op
+  // for employees and HR; the one line that makes it safe for an admin.
   useEffect(() => {
     let alive = true;
     setSavedDraft(null);
+    // Nothing to resume when filing for somebody else: an on-behalf filing is
+    // never drafted (see THE DRAFT RULE below), and the TARGET's draft is
+    // theirs, not something to load into an admin's screen.
+    if (!forSelf) return;
     (async () => {
       const { data, error } = await api
         .from("ts_timesheets")
         .select("id,month,year,days,draft")
+        .eq("user_id", uid)
         .eq("year", year)
         .eq("month", month)
         .single();
@@ -635,9 +874,27 @@ export default function DashboardClient({ profile, submissions = [] }) {
     // `api` is rebuilt every render and is stateless; depending on it would
     // refetch on every keystroke.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [year, month]);
+  }, [year, month, forSelf, uid]);
 
   async function writeDraft() {
+    // THE DRAFT RULE: ts_timesheets.draft for user X is written only by X, in
+    // X's own session, and offered back only to X.
+    //
+    // A draft lives under unique(user_id, year, month) and is written only
+    // through /api/data, where cleanValues() force-overwrites the owner and
+    // buildWhere() gates `seeAll` on op === "select" — so every UPDATE stays
+    // owner-scoped. An admin therefore has exactly one draft slot per month and
+    // CANNOT write into anyone else's. The only other option would be to write
+    // into the TARGET's slot, which would hand the employee a half-finished
+    // admin grid as "your unfinished timesheet" and let them file it through
+    // /api/data as a self-entered submission — no note, no `entry` stamp, no
+    // audit row. That is a capability we decline, not a bug we work around.
+    //
+    // Left unguarded this is worse than useless: a cross-user update matches
+    // zero rows and returns `error: null`, and the catch below only fires on
+    // `error` — so the screen would confidently report "Draft saved" over an
+    // hour of unsaved payroll entry. The UI says the opposite instead.
+    if (!forSelf) return;
     if (draftOff.current) return;
     if (draftBusy.current) { draftAgain.current = true; return; }
     draftBusy.current = true;
@@ -698,6 +955,11 @@ export default function DashboardClient({ profile, submissions = [] }) {
   // already fresh when this schedules.
   useEffect(() => {
     if (mode !== "review" || justSubmitted) return;
+    // The on-behalf guard lives INSIDE this condition, not as a one-shot
+    // `draftOff` latch: this effect re-arms `draftOff.current = false` on every
+    // dependency change, so a latch set anywhere else would be undone by the
+    // next keystroke.
+    if (!forSelf) return;
     // A filed timesheet is not a draft — submit() latched the writer off. But
     // EDITING it afterwards is a correction in progress, i.e. unfinished work
     // again, and losing that is the same bug. `alreadySubmitted` goes false the
@@ -707,20 +969,32 @@ export default function DashboardClient({ profile, submissions = [] }) {
     draftUnsaved.current = true;
     const t = setTimeout(() => { writeDraftRef.current(); }, 1200);
     return () => clearTimeout(t);
-  }, [mode, justSubmitted, alreadySubmitted, calendar, fields, q, holidayWork, aiMeta, aiApproval]);
+  }, [mode, justSubmitted, forSelf, alreadySubmitted, calendar, fields, q, holidayWork, aiMeta, aiApproval]);
+
+  // The live calendar, for the unload guard below — a ref rather than a
+  // dependency so the listener isn't torn down and re-registered per keystroke.
+  const calendarRef = useRef(calendar);
+  useEffect(() => { calendarRef.current = calendar; });
 
   // Last line of defence for the 1.2s window between a keystroke and its save.
   useEffect(() => {
     if (mode !== "review" || justSubmitted) return;
     const onLeave = (e) => {
-      if (!draftUnsaved.current && !draftBusy.current) return;
+      // On-behalf work is NOT autosaved, so `draftUnsaved` is permanently false
+      // there and leaning on it would disarm this guard exactly where it is most
+      // needed: an hour of entry with nothing behind it. Any hours on screen
+      // count as unsaved work instead.
+      const dirty = forSelf
+        ? (draftUnsaved.current || draftBusy.current)
+        : calendarRef.current.some((c) => dayHours(c) > 0);
+      if (!dirty) return;
       e.preventDefault();
       e.returnValue = "";
       return "";
     };
     window.addEventListener("beforeunload", onLeave);
     return () => window.removeEventListener("beforeunload", onLeave);
-  }, [mode, justSubmitted]);
+  }, [mode, justSubmitted, forSelf]);
 
   function resumeDraft() {
     const row = savedDraft;
@@ -808,6 +1082,9 @@ export default function DashboardClient({ profile, submissions = [] }) {
     setDayIdx(null);
     setBulkHours(String(STANDARD_DAY)); setBulkMsg(""); setBulkUndo(null);
     setDraftSavedAt(null); setResumedAt(null);
+    // A supersede prompt is about ONE person and ONE month. Acting on a stale
+    // one would retire a timesheet nobody looked at.
+    setConflict(null);
     if (mode !== "review") return;   // upload step: nothing built yet
     // Rebuild for the new month first, so the screen is never showing one
     // month's hours under another month's heading, even briefly.
@@ -849,6 +1126,90 @@ export default function DashboardClient({ profile, submissions = [] }) {
   // Point at the first thing that is actually missing. The submit button used to
   // be disabled whenever validation failed, which left an employee with a greyed
   // button, a prose banner, and no target to go and fix.
+  // ---------- changing WHO this is for --------------------------------------
+  // Treated exactly like a period change, and for the same reason: every piece
+  // of subject-keyed state has to move with it or the mixture is worse than the
+  // dead end it replaces.
+  //
+  // `fields` IS THE ONE THAT IS NOT COSMETIC. It is seeded from the signed-in
+  // profile at mount, the AI merge falls back to it (`emp.employee_name ||
+  // prev.employee_name`), and submit() carries it into the record — so without
+  // a re-seed a document that does not clearly name the worker leaves the
+  // ADMIN's name and staff code on the employee's review screen, looking
+  // perfectly correct. /api/admin/timesheet overwrites both from the target's
+  // own ts_profiles row before storing, so this cannot mis-file anybody; what
+  // it prevents is a screen that shows the wrong person's identity while the
+  // admin decides whether the hours are right.
+  function seedFieldsFor(t) {
+    if (!t) return { employee_name: "", employee_id: "", client: "", project: "", employer: "" };
+    // The roster row, not the target: resolveTarget deliberately carries only
+    // what it needs to decide identity, and employee_code is not part of that.
+    const row = t.kind === "self" ? profile : (people.find((p) => p.id === t.id) || {});
+    return {
+      employee_name: row.full_name || t.name || "",
+      employee_id: row.employee_code || (t.kind === "new" ? (who.newCode || "") : ""),
+      client: row.client || t.client || "",
+      project: "",
+      // Only ever known for yourself — /api/admin/people does not return it, and
+      // guessing the admin's employer onto an employee's sheet would be a lie.
+      employer: t.kind === "self" ? (profile.employer || "") : "",
+    };
+  }
+
+  // A change of SUBJECT resets the screen to the upload step. That is safe to do
+  // unconditionally because the picker is only editable in the upload step (in
+  // the review step it is a locked strip whose "change" link runs the
+  // confirmation below first) — so nothing can be silently thrown away here.
+  const lastSubject = useRef(subjectKey);
+  useEffect(() => {
+    if (lastSubject.current === subjectKey) return;
+    lastSubject.current = subjectKey;
+    setFields(seedFieldsFor(target));
+    setMode("upload");
+    // A document is stored under the SUBJECT's prefix, so it belongs to the
+    // person who was chosen when it was attached — and a person who does not
+    // exist yet has no prefix at all (the route refuses a file in `new` mode
+    // outright). Drop it rather than file it against the wrong record.
+    setFile(null);
+    if (fileInput.current) fileInput.current.value = "";
+    storedRef.current = null;
+    setPreviewPages([]); dropPreviewDoc(); setShowPreview(false);
+    setTimesheetRef(null);
+    setCalendar([]); setQ({}); setHolidayWork({});
+    aiBaseline.current = null;
+    setAiMeta(null); setAiApproval(null);
+    setProcessError(""); setAttachWarn(""); setSavedMsg("");
+    setJustSubmitted(false); setShowErrors(false); setSubmittedSig(null);
+    setBulkHours(String(STANDARD_DAY)); setBulkMsg(""); setBulkUndo(null);
+    // The resume card, the note and the server's verdicts all belong to the
+    // PREVIOUS subject. draftSavedAt/resumedAt likewise.
+    setSavedDraft(null); setDraftSavedAt(null); setResumedAt(null);
+    draftUnsaved.current = false;
+    setNote(""); setConflict(null);
+    setEmailErr(""); setCodeErr(""); setSameNameFromServer(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subjectKey]);
+
+  // The server's "that address is taken" verdict is about ONE address; the
+  // moment it is edited the message is about something nobody typed. Same rule
+  // for the namesake list, which is the answer to ONE name — a stale "already
+  // registered" list is how an admin gets talked out of adding a real person.
+  useEffect(() => { setEmailErr(""); }, [who.newEmail]);
+  useEffect(() => { setCodeErr(""); }, [who.newCode]);
+  useEffect(() => { setSameNameFromServer(null); }, [who.newName, who.mode]);
+
+  // A change of person or period makes a supersede prompt stale.
+  useEffect(() => { setConflict(null); }, [subjectKey]);
+
+  // "Change who this is for" from the review step. Same confirmation as a
+  // period switch, and for the same reason — it rebuilds the grid.
+  const [pendingWho, setPendingWho] = useState(null);
+  function requestTargetChange() {
+    if (processing || saving) return;
+    if (periodChangeIsFree()) { setMode("upload"); return; }
+    setPendingWho(true);
+  }
+
   function focusFirstProblem() {
     const blank = (v) => v === "" || v === null || v === undefined;
     // In page order, so the employee is sent to the FIRST thing to fix. Every id
@@ -859,6 +1220,10 @@ export default function DashboardClient({ profile, submissions = [] }) {
     // fallback is the validation banner.
     const targets = [
       ["ts-employee-name", !String(fields.employee_name || "").trim()],
+      // The on-behalf blocker with a text box. Placed before the questionnaire
+      // ids because it sits above them on that path — and it is the ONLY thing
+      // the route hard-400s a filing for.
+      ["ts-behalf-note", noteRequired && !noteOk],
       ["ts-regular-hours", blank(q.regularHours)],
       ["ts-overtime-hours", blank(q.overtimeHours)],
       ["ts-worked-weekends", blank(q.workedWeekends)],
@@ -874,77 +1239,210 @@ export default function DashboardClient({ profile, submissions = [] }) {
     if (typeof el.focus === "function") el.focus({ preventScroll: true });
   }
 
-  async function submit() {
+  // The AI-related keys every filing carries, whichever route it goes to. The
+  // stamp is the RECEIPT, not the claim: both routes re-read the verdict out of
+  // it against the CALLER and drop the unsigned keys beside it if it doesn't
+  // verify (lib/aws/ai-fields.js). It is an input, like `days`, and neither
+  // route stores it.
+  function aiKeys() {
+    return {
+      flow: aiMeta?.flow || null,
+      agent_trace: aiMeta?.agentTrace || null,
+      review_status: aiMeta?.reviewStatus || null,
+      ai_stamp: aiMeta?.aiStamp || null,
+    };
+  }
+
+  async function submit(supersede = false) {
     setShowErrors(true);
     // THE gate. Nothing below it may run while the timesheet is invalid — this
-    // early return is the only thing between a click and an insert into the
-    // append-only ts_employee_edits.
-    if (!validation.ok) { focusFirstProblem(); return; }
+    // early return is the only thing between a click and a payroll record.
+    // `blockers` is validate.js's errors PLUS the two things it has no business
+    // knowing: whether a subject has been chosen, and whether the mandatory
+    // on-behalf note is there.
+    if (!canSubmit) { focusFirstProblem(); return; }
     // Second gate: this exact timesheet is already filed. The DB trigger would
     // supersede the duplicate so nothing gets double-paid, but the row would
     // still be written and the admin would see a resubmission that isn't one.
     if (saving || alreadySubmitted) return;
     setSaving(true);
     setSavedMsg("");
+    setProcessError("");
     try {
-      const tid = await ensureTimesheet();
-      const r = rollup(calendar);
-      const { error } = await api.from("ts_employee_edits").insert({
-        timesheet_id: tid, user_id: uid, month, year,
-        fields: { ...fields, totals: r,
-                  flow: aiMeta?.flow || null, agent_trace: aiMeta?.agentTrace || null,
-                  review_status: aiMeta?.reviewStatus || null,
-                  // The receipt, not the claim: the server re-reads the verdict
-                  // out of this and drops the two keys above if it doesn't
-                  // verify. Not stored — it is an input, like `days`.
-                  ai_stamp: aiMeta?.aiStamp || null,
-                  // The compact approval record, so the admin list can show a
-                  // column and build the chase-list without opening every
-                  // questionnaire blob. Its own key, deliberately NOT inside
-                  // `totals` — nothing approval-related may sit in the
-                  // money-bearing object the server re-derives.
-                  approval: approvalSummary({ ...q, holidayWork }) },
-        days: calendar,
-        questionnaire: { ...q, holidayWork },
-        validation: { errors: validation.errors, warnings: validation.warnings },
-        submitted: true,
-      });
-      if (error) throw error;
-      // The submission is filed, so this is no longer a draft. Latch the
-      // autosave off FIRST: a debounced write already in flight would otherwise
-      // land after the clear below and re-offer a finished timesheet as
-      // "unfinished" on the next visit. Set only after the insert succeeded —
-      // a failed submit must leave the draft live and still saving.
-      draftOff.current = true;
-      draftUnsaved.current = false;
-      // Keep ts_timesheets in sync with the latest edit. `days` is sent so the
-      // server DERIVES the totals — previously this posted monthly_* directly
-      // with no days, so those columns came straight from the browser.
-      await api.from("ts_timesheets").update({
-        days: calendar,
-        questionnaire: { ...q, holidayWork },
-        validation: { errors: validation.errors, warnings: validation.warnings },
-        draft: null,   // finished: nothing left to resume
-      }).eq("id", tid);
-      setDraftSavedAt(null);
-      setResumedAt(null);
-      setSavedMsg("Timesheet submitted ✓  Your manager can now review it.");
-      setJustSubmitted(true);
-      // Freeze what was filed, so the still-visible review form reads
-      // "Submitted" instead of offering a live Submit button.
-      setSubmittedSig(currentSig);
-      // The `submissions` prop comes from the server component and is otherwise
-      // frozen at first mount, so the proof-of-submission banner never appeared
-      // for a first-time submitter: "Start another" dropped them back on an
-      // empty upload screen with no evidence anything happened. Re-render the
-      // server component to pull the row we just inserted. Client state (the
-      // calendar, the success modal) survives a refresh.
-      router.refresh();
+      if (forSelf) await submitAsSelf();
+      else await submitOnBehalf(supersede);
     } catch (e) {
       setProcessError(String(e.message || e));
     } finally {
       setSaving(false);
     }
+  }
+
+  // ---- MY OWN HOURS: /api/data, byte for byte what shipped before ----------
+  // This path alone stores the client's validation.errors/warnings, and it alone
+  // gets draft resumability. Both are kept.
+  async function submitAsSelf() {
+    const tid = await ensureTimesheet();
+    const r = rollup(calendar);
+    const { error } = await api.from("ts_employee_edits").insert({
+      timesheet_id: tid, user_id: uid, month, year,
+      fields: { ...fields, totals: r,
+                ...aiKeys(),
+                // The compact approval record, so the admin list can show a
+                // column and build the chase-list without opening every
+                // questionnaire blob. Its own key, deliberately NOT inside
+                // `totals` — nothing approval-related may sit in the
+                // money-bearing object the server re-derives.
+                approval: approvalSummary({ ...q, holidayWork }) },
+      days: calendar,
+      questionnaire: { ...q, holidayWork },
+      validation: { errors: validation.errors, warnings: validation.warnings },
+      submitted: true,
+    });
+    if (error) throw error;
+    // The submission is filed, so this is no longer a draft. Latch the
+    // autosave off FIRST: a debounced write already in flight would otherwise
+    // land after the clear below and re-offer a finished timesheet as
+    // "unfinished" on the next visit. Set only after the insert succeeded —
+    // a failed submit must leave the draft live and still saving.
+    draftOff.current = true;
+    draftUnsaved.current = false;
+    // Keep ts_timesheets in sync with the latest edit. `days` is sent so the
+    // server DERIVES the totals — previously this posted monthly_* directly
+    // with no days, so those columns came straight from the browser.
+    await api.from("ts_timesheets").update({
+      days: calendar,
+      questionnaire: { ...q, holidayWork },
+      validation: { errors: validation.errors, warnings: validation.warnings },
+      draft: null,   // finished: nothing left to resume
+    }).eq("id", tid);
+    finishSubmit("Timesheet submitted ✓  Your manager can now review it.");
+  }
+
+  // ---- SOMEBODY ELSE'S HOURS: /api/admin/timesheet, and no /api/data write --
+  //
+  // ONE request, whether or not a person has to be created first. `for:"new"`
+  // makes the route register the person INSIDE the same transaction as the
+  // filing, so a failure anywhere rolls the person back too — no client can make
+  // two HTTP calls atomic, and a separate POST /api/admin/people first would
+  // leave an orphan payroll record behind every time the filing then failed.
+  //
+  // Note what is NOT sent: no role (newPerson has no role key to aim at, and
+  // lib/aws/people.js writes 'employee' as a literal), and NO TOTALS — the route
+  // derives them from `days` with the same formula and the same bounds.
+  async function submitOnBehalf(supersede) {
+    const kind = target.kind === "self" ? "self" : target.kind === "new" ? "new" : "existing";
+    // The document, if one was attached. Guarded on the memo's targetId as well
+    // as its existence: a path belonging to a different person is exactly what
+    // route.js's `path.startsWith(\`${targetUserId}/\`)` check refuses, and
+    // sending it would fail the filing after the bytes are already in the bucket.
+    const filePayload = file && storedRef.current &&
+      sameStoredFile(storedRef.current, { fileName: file.name, per: period, targetId: target.id })
+      ? { path: storedRef.current.path, name: file.name,
+          mime: file.type || null, size: file.size || null }
+      : null;
+
+    const res = await fetch(ADMIN_ROUTE, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        for: kind,
+        // Ignored by the route in self/new mode; sent only for "existing".
+        employeeUserId: kind === "existing" ? target.id : null,
+        newPerson: kind === "new"
+          ? { full_name: target.name, email: target.email,
+              client: fields.client || null,
+              // The payroll import's match key. Sent because it is guarded — the
+              // server refuses a code that belongs to somebody else, and the
+              // export refuses a period in which two people share one.
+              employee_code: target.code || null,
+              // The admin's answer to "somebody of this name already exists".
+              // Absent/false means the question has not been answered and the
+              // server asks it (409 needsDistinctConfirmation).
+              confirmDistinctPerson: target.confirmDistinct === true }
+          : null,
+        year, month,
+        days: calendar,                 // the ONLY hours of record
+        note: note.trim(),
+        supersede: !!supersede,
+        fields: { ...fields, ...aiKeys(),
+                  approval: approvalSummary({ ...q, holidayWork }) },
+        // The real answers now — the holiday Worked/Not-worked map, the manager
+        // approval reading, the optional PTO/notes. This used to be a dead
+        // { enteredByAdmin, adminEmail } that nothing read; every provenance
+        // reader in the app uses fields.entry.origin, which the server stamps.
+        questionnaire: { ...q, holidayWork },
+        file: filePayload,
+      }),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      // Not failures — questions, each about ONE field, each answered on the
+      // picker rather than in a banner the admin cannot act on. Nothing was
+      // written: the route rolled the whole filing back, person included.
+      if (j.needsSupersede) { setConflict(j.existing || []); scrollTo("ts-conflict"); return; }
+      if (j.needsDistinctConfirmation) {
+        setSameNameFromServer(j.sameName || []); scrollTo("ts-target-card"); return;
+      }
+      const msg = j.error || "couldn't file this timesheet";
+      // A clashing employee code is about ONE field too, and it is the field a
+      // payroll import matches on — so it goes BESIDE THAT INPUT, not into a
+      // banner at the far end of the page. (The console's modal declared that
+      // intent in a comment and then rendered it in the banner anyway; this is
+      // the intent, implemented.) Checked BEFORE the email branch: its message
+      // mentions the person's email, which the /e-?mail/ test would claim.
+      if (kind === "new" && j.duplicateEmployeeCode) {
+        setCodeErr(j.hint ? `${msg} ${j.hint}` : msg); scrollTo("ts-target-card"); return;
+      }
+      // `duplicateEmail` is the route's own marker; the text match additionally
+      // catches PersonInputError's 400s, which are about the email or the name
+      // and carry no code.
+      if (kind === "new" && (j.duplicateEmail || /e-?mail/i.test(msg))) {
+        setEmailErr(j.hint ? `${msg} ${j.hint}` : msg); scrollTo("ts-target-card"); return;
+      }
+      throw new Error(msg);
+    }
+    setConflict(null);
+    finishSubmit(
+      j.status === "approved"
+        ? `Filed for ${target.name} ✓  Approved and payable — no further review.`
+        : `Filed for ${target.name} ✓  It is now in the review queue for an admin.`
+    );
+  }
+
+  // THE SERVER'S ANSWER MUST BE ON SCREEN. A supersede prompt and the two
+  // new-person verdicts all render ABOVE the review form — around 1500px from
+  // the Submit button on a page this long — so without this a 409 looks exactly
+  // like the button doing nothing. The console's modal had the same problem and
+  // solved it by scrolling .modal-body; here the scroller is the window.
+  //
+  // Deliberately NOT a mode switch: the verdicts render in the review step too
+  // (the target card comes back live whenever one is pending, and the conflict
+  // prompt is page-level), so the grid, the questionnaire and the extraction all
+  // stay where they are and the admin answers the question in place.
+  function scrollTo(id) {
+    setTimeout(() => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.scrollIntoView({ block: "center", behavior: "smooth" });
+      if (typeof el.focus === "function") el.focus({ preventScroll: true });
+    }, 0);
+  }
+
+  function finishSubmit(message) {
+    setDraftSavedAt(null);
+    setResumedAt(null);
+    setSavedMsg(message);
+    setJustSubmitted(true);
+    // Freeze what was filed, so the still-visible review form reads
+    // "Submitted" instead of offering a live Submit button.
+    setSubmittedSig(currentSig);
+    // The `submissions` prop comes from the server component and is otherwise
+    // frozen at first mount, so the proof-of-submission banner never appeared
+    // for a first-time submitter: "Start another" dropped them back on an
+    // empty upload screen with no evidence anything happened. Re-render the
+    // server component to pull the row we just inserted. Client state (the
+    // calendar, the success modal) survives a refresh.
+    router.refresh();
   }
 
   function resetForNew() {
@@ -965,6 +1463,9 @@ export default function DashboardClient({ profile, submissions = [] }) {
     setSubmittedSig(null);
     // never leave an undo snapshot of a DIFFERENT month's calendar behind
     setBulkHours(String(STANDARD_DAY)); setBulkMsg(""); setBulkUndo(null);
+    // The note explains ONE filing, and the prompts belong to ONE attempt.
+    setNote(""); setConflict(null);
+    setEmailErr(""); setCodeErr(""); setSameNameFromServer(null);
   }
 
   // ---------- render ----------
@@ -974,7 +1475,15 @@ export default function DashboardClient({ profile, submissions = [] }) {
       <div className="container" style={{ padding: "22px 24px 60px" }}>
         <div className="between" style={{ marginBottom: 18, flexWrap: "wrap", gap: 12 }}>
           <div>
-            <h1 style={{ fontSize: 22 }}>My Timesheet</h1>
+            {/* Name the screen for whose hours are on it. A page headed "My
+                Timesheet" while an admin fills in somebody else's month is the
+                kind of quiet mislabelling that ends with the wrong person
+                paid. */}
+            <h1 style={{ fontSize: 22 }}>
+              {forSelf ? "My Timesheet"
+                : target ? `Timesheet for ${target.name}`
+                : "File a timesheet for someone else"}
+            </h1>
             <p className="muted" style={{ marginTop: 2 }}>
               {periodTouched ? (
                 <>Period — <b>{periodLabel(month, year)}</b>.</>
@@ -1012,6 +1521,58 @@ export default function DashboardClient({ profile, submissions = [] }) {
           </div>
         </div>
 
+        {/* ---- WHO IS THIS TIMESHEET FOR? ------------------------------------
+            FIRST CARD ON THE PAGE, ABOVE THE DROPZONE, and that position is
+            forced rather than chosen: saveBaseline() runs at EXTRACTION time
+            (from processAI and startManual), writing the ts_files row and the
+            ts_timesheets baseline before a Submit button exists. A picker in
+            the review step would be two rows too late.
+
+            In the review step it becomes a locked one-line strip instead — a
+            1700-line review screen that never restates whose payroll record is
+            about to be written is how the wrong person gets paid. The one
+            exception is a server verdict about a NEW person: those are answered
+            on these fields, so the live picker comes back to be answered. */}
+        {canFile && (mode === "upload" || emailErr || codeErr || sameNameFromServer ? (
+          <div className="card card-pad" id="ts-target-card" style={{ marginBottom: 16 }}>
+            <TimesheetTargetPicker
+              value={who} onChange={setWho}
+              roster={roster} people={people} self={profile}
+              serverEmailError={emailErr}
+              serverCodeError={codeErr}
+              serverSameName={sameNameFromServer}
+            />
+            {!forSelf && (
+              <div className="muted" style={{ fontSize: 12 }}>
+                Filed in the employee’s name, signed by you, and marked “entered by
+                admin”. You get the same document upload and AI extraction as they
+                would — anything you attach is stored against <b>them</b>, so they
+                can see it too.
+              </div>
+            )}
+            {mode !== "upload" && (
+              <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>
+                Answer the question above and press <b>File this timesheet</b> again —
+                your hours, corrections and the document you attached are all still
+                below, exactly as you left them.
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="alert info alert-row" id="ts-target-card" style={{ marginBottom: 16 }}>
+            <span>
+              Filing for <b>{target ? target.name : "nobody yet"}</b>
+              {fields.employee_id ? <> · employee code {fields.employee_id}</> : null}
+              {forSelf ? " (yourself)" : ""}
+            </span>
+            <a style={{ marginLeft: "auto", cursor: "pointer" }} role="button" tabIndex={0}
+               onClick={requestTargetChange}
+               onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && requestTargetChange()}>
+              change
+            </a>
+          </div>
+        ))}
+
         {/* Re-reading after a period switch: the review form is still on screen
             with an empty grid, so without this it looks like the switch wiped
             the document for no reason. */}
@@ -1034,8 +1595,17 @@ export default function DashboardClient({ profile, submissions = [] }) {
 
         {/* Proof of submission. Without this the dashboard is write-only: an
             employee who submits and comes back sees an empty upload screen with
-            no sign anything happened — and no confirmation email exists yet. */}
-        {currentSubmission && mode === "upload" && !justSubmitted && (
+            no sign anything happened — and no confirmation email exists yet.
+
+            YOUR OWN ROWS ONLY, hence `forSelf`. "Has this person already filed?"
+            is deliberately NOT answered here on the on-behalf path: pulling the
+            target's submissions into the dashboard payload would re-create the
+            very leak app/dashboard/page.js just closed, and the route's 409
+            needsSupersede handshake is a strictly better answer anyway — it is
+            FOR UPDATE-locked, it covers the approved and rejected rows the DB
+            trigger deliberately leaves alone, and it names the rows before
+            anything is retired. */}
+        {forSelf && currentSubmission && mode === "upload" && !justSubmitted && (
           /* "info" and not "": submitted-awaiting-review is the state this card
              spends the whole review window in, and an alert with no modifier
              used to be the one with no tint — the proof-of-submission card
@@ -1065,7 +1635,7 @@ export default function DashboardClient({ profile, submissions = [] }) {
         {/* Unfinished work, offered back. The hours shown here are rolled up
             from the SAME `days` array resumeDraft() loads into the calendar, so
             the number on this card is the number you get when you click it. */}
-        {mode === "upload" && savedDraft && (
+        {forSelf && mode === "upload" && savedDraft && (
           <div className="alert info" style={{ marginBottom: 16 }}>
             <b>You have an unfinished timesheet for {periodLabel(month, year)}.</b>
             <div style={{ marginTop: 4 }}>
@@ -1100,6 +1670,36 @@ export default function DashboardClient({ profile, submissions = [] }) {
           <div className="alert error" style={{ marginBottom: 16 }}>{processError}</div>
         )}
 
+        {/* THE SUPERSEDE HANDSHAKE. The route locks every non-superseded row for
+            this employee+month FOR UPDATE and refuses unless the caller has
+            explicitly asked to replace them — so an admin can never blind-
+            overwrite an employee's own pending submission. This prompt is the
+            ONLY code path in the product that can send supersede:true; without
+            it that branch of the route is unreachable and filing over an
+            existing row is a dead end. */}
+        {conflict && (
+          <div className="alert warn" id="ts-conflict" tabIndex={-1}
+               data-scroll-target="" style={{ marginBottom: 16 }}>
+            <b>{target?.name || "This employee"} already has a timesheet for{" "}
+              {periodLabel(month, year)}</b>{" "}
+            ({conflict.map((c) => c.status).join(", ")}).
+            Filing yours will mark {conflict.length === 1 ? "it" : "them"} as{" "}
+            <b>replaced</b>, so payroll still sees exactly one timesheet for this
+            month. The replaced {conflict.length === 1 ? "row stays" : "rows stay"}{" "}
+            visible under the “Replaced” bucket in the console.
+            <div className="row" style={{ gap: 8, marginTop: 10 }}>
+              <button className="btn btn-primary btn-sm" disabled={saving}
+                      onClick={() => submit(true)}>
+                {saving ? "Filing…" : "Replace it and file mine"}
+              </button>
+              <button className="btn btn-ghost btn-sm" disabled={saving}
+                      onClick={() => setConflict(null)}>
+                Leave theirs alone
+              </button>
+            </div>
+          </div>
+        )}
+
         {mode === "upload" && (
           <UploadStep
             file={file} drag={drag} setDrag={setDrag} fileInput={fileInput}
@@ -1107,6 +1707,7 @@ export default function DashboardClient({ profile, submissions = [] }) {
             startManual={startManual} processError={processError}
             previewPages={previewPages} previewDoc={previewDoc} previewLoading={previewLoading}
             aiEnabled={AI_ENABLED}
+            attachBlocked={attachBlocked}
           />
         )}
 
@@ -1115,11 +1716,16 @@ export default function DashboardClient({ profile, submissions = [] }) {
             submitError={processError}
             fields={fields} setField={setField} calendar={calendar} month={month} year={year}
             onDayClick={setDayIdx} validation={validation} totals={totals}
+            blockers={blockers} canSubmit={canSubmit}
             q={q} setQ={setQ} holidays={holidays} holidayWork={holidayWork} setHolidayWork={setHolidayWork}
             aiMeta={aiMeta} approval={aiApproval}
             emptyExtraction={emptyExtraction} onSwitchPeriod={requestPeriod}
             saving={saving} submit={submit} showErrors={showErrors}
             alreadySubmitted={alreadySubmitted}
+            forSelf={forSelf} targetName={target?.name || null}
+            willBeApproved={willBeApproved} isNewPerson={target?.kind === "new"}
+            note={note} setNote={setNote} noteRequired={noteRequired}
+            nameMismatch={nameMismatch}
             onClearDayHours={clearDayHours} onRestoreAiHours={restoreAiHours}
             onSetDayHours={setDayHours} onEditDay={openDay}
             hoursOnDate={hoursOnDate} workedHoursOnDate={workedHoursOnDate}
@@ -1146,6 +1752,18 @@ export default function DashboardClient({ profile, submissions = [] }) {
           hours={rollup(calendar).total}
           onCancel={() => setPendingPeriod(null)}
           onConfirm={() => { const p = pendingPeriod; setPendingPeriod(null); applyPeriod(p); }}
+        />
+      )}
+
+      {/* Changing WHO this is for rebuilds the grid exactly as changing the
+          month does, so it is stated in full before it happens rather than
+          being prevented outright. */}
+      {pendingWho && (
+        <TargetSwitch
+          who={target?.name || "this person"}
+          hours={rollup(calendar).total}
+          onCancel={() => setPendingWho(null)}
+          onConfirm={() => { setPendingWho(null); setMode("upload"); }}
         />
       )}
 
@@ -1217,6 +1835,43 @@ function PeriodSwitch({ from, to, willReread, hours, onCancel, onConfirm }) {
   );
 }
 
+// ---------------- change-of-subject confirmation ----------------
+// The same shape as PeriodSwitch, and for the same reason: hours are recorded
+// per person as well as per day, so there is no honest way to move a grid built
+// for one employee onto another. Say what will be cleared, then clear it.
+function TargetSwitch({ who, hours, onCancel, onConfirm }) {
+  const dialogRef = useDialogKeys(onCancel);
+  return (
+    <div className="modal-bg" onClick={onCancel}>
+      <div className="modal" ref={dialogRef} onClick={(e) => e.stopPropagation()} role="dialog"
+           aria-modal="true" aria-label="Change who this timesheet is for">
+        <div className="modal-head">
+          <h2 style={{ margin: 0, fontSize: 17 }}>Change who this is for?</h2>
+        </div>
+        <div className="modal-body">
+          <p className="muted" style={{ margin: "0 0 10px" }}>
+            These hours were entered for <b>{who}</b>.
+            {hours > 0
+              ? ` The ${hours} hour${hours === 1 ? "" : "s"} on the grid will be cleared`
+              : " The current grid will be cleared"}, along with any document you
+            attached — a document is stored against the person it belongs to, so it
+            cannot follow you to somebody else.
+          </p>
+          <p className="muted" style={{ margin: "0 0 18px" }}>
+            Nothing has been filed, and nothing already filed for {who} is touched.
+          </p>
+          <div className="row" style={{ justifyContent: "flex-end", gap: 10 }}>
+            <button className="btn btn-ghost" onClick={onCancel}>Keep filing for {who}</button>
+            <button className="btn btn-primary" onClick={onConfirm} autoFocus>
+              Clear this and choose someone else
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // The month the document's clipped-away entries actually belonged to, when the
 // extractor reported one. Only ever a SUGGESTION for a button the employee
 // presses; nothing acts on it automatically, and no total is derived from it.
@@ -1252,7 +1907,7 @@ function whenLabel(iso) {
 }
 
 // ---------------- upload step ----------------
-function UploadStep({ file, drag, setDrag, fileInput, onPickFile, processing, processAI, startManual, processError, previewPages, previewDoc, previewLoading, aiEnabled }) {
+function UploadStep({ file, drag, setDrag, fileInput, onPickFile, processing, processAI, startManual, processError, previewPages, previewDoc, previewLoading, aiEnabled, attachBlocked }) {
   const card = (
     <div className="card card-pad">
       <h3 className="card-title">{aiEnabled ? "1 · Upload your timesheet" : "Your timesheet"}</h3>
@@ -1261,22 +1916,36 @@ function UploadStep({ file, drag, setDrag, fileInput, onPickFile, processing, pr
           AI auto-fill isn’t enabled in this deployment. Attach your file (optional, stored for your manager) and enter your hours on the next screen.
         </div>
       )}
+      {/* A document belongs to the person the timesheet is about, so it cannot
+          be attached before there is such a person to attach it to. Refuse here
+          and say why, rather than accepting the file and failing at extraction
+          with a message about storage. */}
+      {attachBlocked && (
+        <div className="alert warn" style={{ marginBottom: 14 }}>{attachBlocked}</div>
+      )}
       <div
         className={"dropzone" + (drag ? " drag" : "")}
-        onClick={() => fileInput.current?.click()}
-        onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
+        aria-disabled={attachBlocked ? "true" : undefined}
+        onClick={() => { if (!attachBlocked) fileInput.current?.click(); }}
+        onDragOver={(e) => { e.preventDefault(); if (!attachBlocked) setDrag(true); }}
         onDragLeave={() => setDrag(false)}
-        onDrop={(e) => { e.preventDefault(); setDrag(false); onPickFile(e.dataTransfer.files?.[0]); }}
+        onDrop={(e) => {
+          e.preventDefault(); setDrag(false);
+          if (!attachBlocked) onPickFile(e.dataTransfer.files?.[0]);
+        }}
       >
         {/* Derived from the SAME allowlist the upload route enforces. The old
             literal led with `image/*`, which let the picker offer .bmp/.tif —
             formats nothing here renders and the uploader rejects. */}
         <input ref={fileInput} type="file" hidden
-          accept={ACCEPT_ATTR}
+          accept={ACCEPT_ATTR} disabled={!!attachBlocked}
           onChange={(e) => onPickFile(e.target.files?.[0])} />
         <div style={{ fontSize: 30 }}>📄</div>
         <div style={{ fontWeight: 600, marginTop: 6 }}>
-          {file ? file.name : aiEnabled ? "Drop a file or click to browse" : "Attach your timesheet (optional)"}
+          {attachBlocked ? "Document upload unavailable"
+            : file ? file.name
+            : aiEnabled ? "Drop a file or click to browse"
+            : "Attach your timesheet (optional)"}
         </div>
         <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
           PDF, scanned PDF, Excel, CSV, Word, or a photo — up to {MAX_UPLOAD_MB} MB
@@ -1323,18 +1992,37 @@ function UploadStep({ file, drag, setDrag, fileInput, onPickFile, processing, pr
 // ---------------- review step ----------------
 function ReviewStep({
   fields, setField, calendar, month, year, onDayClick, validation, totals,
+  blockers, canSubmit,
   q, setQ, holidays, holidayWork, setHolidayWork, aiMeta, approval, saving, submit,
   emptyExtraction, onSwitchPeriod,
   showPreview, previewPages, previewDoc, previewLoading, fileName, togglePreview, resetForNew,
   submitError, showErrors, alreadySubmitted,
+  forSelf, targetName, willBeApproved, isNewPerson,
+  note, setNote, noteRequired, nameMismatch,
   onClearDayHours, onRestoreAiHours, onSetDayHours, onEditDay,
   hoursOnDate, workedHoursOnDate, aiHoursOnDate,
   bulkHours, setBulkHours, emptyWeekdayCount, onFillWeekdays, onUndoFill, canUndoFill, bulkMsg,
   resumedAt, draftSavedAt, draftSaving, draftError,
 }) {
   const nameMissing = !String(fields.employee_name || "").trim();
+  const noteMissing = noteRequired && note.trim().length < 3;
   const left = (
     <div className="stack">
+      {/* The document names somebody other than the person this is filed for.
+          Not a refusal — see nameMismatch's definition — but it is the one
+          mistake an admin working from a pile of paper actually makes. */}
+      {nameMismatch && (
+        <div className="alert warn">
+          <b>⚠ This document says <i>{nameMismatch}</i>, but you are filing for{" "}
+            {targetName}.</b>
+          <div style={{ marginTop: 4 }}>
+            That can be fine — documents carry a client’s spelling, or initials. But
+            if it is the wrong sheet, change it now: the hours below will be filed
+            against <b>{targetName}</b>’s payroll record whatever the document says.
+          </div>
+        </div>
+      )}
+
       {resumedAt && (
         <div className="alert info">
           ↩ Picked up your saved draft from {new Date(resumedAt).toLocaleString()}.
@@ -1416,19 +2104,27 @@ function ReviewStep({
         </div>
       )}
 
-      {/* validation banner */}
-      {validation.errors.length > 0 ? (
+      {/* validation banner. `blockers` is validate.js's errors PLUS the two
+          things it has no business knowing: whether a subject has been chosen,
+          and whether the mandatory on-behalf note is there. One list, because a
+          banner that says "ready to submit" beside a button that refuses is
+          worse than no banner. */}
+      {blockers.length > 0 ? (
         <div className="alert error" id="ts-validation-summary" tabIndex={-1}
              data-scroll-target="">
           <div>
-            <b>Please fix {validation.errors.length} issue{validation.errors.length > 1 ? "s" : ""} before submitting:</b>
+            <b>Please fix {blockers.length} issue{blockers.length > 1 ? "s" : ""} before submitting:</b>
             <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
-              {validation.errors.map((e, i) => <li key={i}>{e}</li>)}
+              {blockers.map((e, i) => <li key={i}>{e}</li>)}
             </ul>
           </div>
         </div>
       ) : (
-        <div className="alert ok">✓ Calendar and answers match. Ready to submit.</div>
+        <div className="alert ok">
+          {forSelf
+            ? "✓ Calendar and answers match. Ready to submit."
+            : `✓ Ready to file for ${targetName}.`}
+        </div>
       )}
       {validation.warnings.length > 0 && (
         <div className="alert warn">
@@ -1450,6 +2146,14 @@ function ReviewStep({
             overtime + other), not off the day's stored `total` */}
         <div className="tile"><div className="v">{calendar.filter((c) => dayHours(c) > 0).length}</div><div className="l">Days worked</div></div>
       </div>
+      {/* Carried across from the retired console modal, because the guarantee is
+          real: /api/admin/timesheet calls deriveTotalsStrict and lib/aws/data.js
+          re-derives monthly_* from `days`, and neither reads a total the browser
+          sent. One sentence for a property worth stating. */}
+      <div className="muted" style={{ fontSize: 12, marginTop: -6 }}>
+        These are a preview. The hours that get stored are recomputed on the server
+        from the day entries below — the totals shown here are never posted.
+      </div>
 
       {/* identity fields */}
       <div className="card card-pad">
@@ -1470,7 +2174,10 @@ function ReviewStep({
               the marker stops meaning "you cannot submit without this". */}
           <Field label="Client / placement" htmlFor="ts-client">
             <input id="ts-client" value={fields.client} onChange={setField("client")} />
-            <span className="hint">Recommended — your admin uses this to match the placement.</span>
+            <span className="hint">
+              {forSelf ? "Recommended — your admin uses this to match the placement."
+                       : "Recommended — payroll uses this to match the placement."}
+            </span>
           </Field>
           <Field label="Project" htmlFor="ts-project">
             <input id="ts-project" value={fields.project} onChange={setField("project")} />
@@ -1517,6 +2224,7 @@ function ReviewStep({
       <Questionnaire q={q} setQ={setQ} holidays={holidays} holidayWork={holidayWork}
         setHolidayWork={setHolidayWork} calendar={calendar} totals={totals}
         approval={approval}
+        onBehalf={!forSelf}
         showErrors={showErrors}
         onClearDayHours={onClearDayHours}
         onRestoreAiHours={onRestoreAiHours}
@@ -1526,6 +2234,34 @@ function ReviewStep({
         workedHoursOnDate={workedHoursOnDate}
         aiHoursOnDate={aiHoursOnDate} />
 
+      {/* THE NOTE. Required by /api/admin/timesheet for every on-behalf filing
+          and deliberately not for your own — an employee submitting their own
+          month explains nothing either, and demanding a justification for your
+          own hours only teaches people to type "." to get past it. It is the
+          text the Admin-revisions tab renders, and on an admin's own-authority
+          filing it is one of the three things that make the hours acceptable at
+          all (with the provenance stamp and the audit row). */}
+      {noteRequired && (
+        <div className="card card-pad">
+          <h3 className="card-title">
+            Why are you filing this for {targetName || "them"}?{" "}
+            <span className="req" aria-hidden="true">*</span>
+          </h3>
+          <div className={"field" + (showErrors && noteMissing ? " invalid" : "")}
+               style={{ marginBottom: 0 }}>
+            <input id="ts-behalf-note" value={note} onChange={(e) => setNote(e.target.value)}
+                   aria-required="true"
+                   aria-invalid={showErrors && noteMissing ? "true" : undefined}
+                   placeholder="e.g. Paper timesheet handed in on 3 Aug — employee has no laptop access" />
+            <span className="hint">
+              {willBeApproved
+                ? "Required. These hours are payable without anyone else reviewing them, so this note and the audit entry are the only record of why they exist."
+                : "Required. Nobody else has seen these hours yet — this note is what the admin reviewing them will read."}
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* submit */}
       <div className="card card-pad between">
         <div style={{ minWidth: 0 }}>
@@ -1533,16 +2269,47 @@ function ReviewStep({
             {submitError
               ? <span style={{ color: "var(--red)" }}><b>Couldn’t submit:</b> {submitError}</span>
               : alreadySubmitted
-                ? <span><b>✓ Submitted.</b> Your manager can now review it. Change anything above to send a correction.</span>
-                : validation.ok ? "Everything checks out." : "Resolve the errors above before submitting."}
+                ? <span><b>✓ Submitted.</b>{" "}
+                    {forSelf
+                      ? "Your manager can now review it."
+                      : willBeApproved
+                        ? `Filed for ${targetName} as approved and payable.`
+                        : `Filed for ${targetName} and queued for an admin's review.`}
+                    {" "}Change anything above to send a correction.</span>
+                : !canSubmit ? "Resolve the errors above before submitting."
+                : /* THE THREE-WAY OUTCOME, mirrored from the route's own status
+                     rule. Governance survives deleting the console modal because
+                     it is server-side — but the honest explanation of it does
+                     not, and "Your manager can now review it" is FALSE for an
+                     admin's on-behalf filing, which lands approved with no
+                     further review. */
+                  forSelf
+                    ? <>Filed in your own name and sent for <b>review</b> — nobody approves their own hours.</>
+                    : willBeApproved
+                      ? <>Filed as <b>approved and payable</b>, in <b>{targetName}</b>’s name
+                          {isNewPerson ? ", who is added to payroll in the same step" : ""}.</>
+                      : <>Filed in <b>{targetName}</b>’s name
+                          {isNewPerson ? ", who is added to payroll in the same step" : ""},
+                          and sent for <b>review</b>: HR enters hours, an admin approves them.</>}
           </div>
           {/* Autosave status. Saying nothing was the old behaviour and it is
               precisely what made a lost session so expensive: the employee had
-              no reason to believe anything was kept. */}
+              no reason to believe anything was kept.
+
+              ON THE ON-BEHALF PATH IT SAYS THE OPPOSITE, because the opposite is
+              true: a draft belongs to one person's own slot and this screen
+              declines to write into anybody else's, so there is nothing behind
+              this work. Promising "you can close this page and come back" here
+              would be a lie that costs an hour of payroll entry. */}
           {!alreadySubmitted && (
             <div style={{ fontSize: 12, marginTop: 4 }}
-                 className={draftError ? "" : "muted"} aria-live="polite">
-              {draftError
+                 className={draftError || !forSelf ? "" : "muted"} aria-live="polite">
+              {!forSelf
+                ? <span style={{ color: "var(--amber)" }}>
+                    ⚠ This is <b>not</b> saved automatically — a draft belongs to the
+                    person whose timesheet it is. Keep this tab open until you file it.
+                  </span>
+                : draftError
                 ? <span style={{ color: "var(--amber)" }}>
                     ⚠ Draft not saved ({draftError}). Keep this page open until it saves.
                   </span>
@@ -1562,10 +2329,18 @@ function ReviewStep({
               The ONE case it is greyed out is `alreadySubmitted`: this exact
               timesheet is already filed, so there is nothing left to press. Edit
               any hour or field and it becomes live again for a correction. */}
-          <button className="btn btn-primary" disabled={saving || alreadySubmitted} onClick={submit}
+          {/* Wrapped, not passed bare: submit()'s first argument is `supersede`,
+              and a bare handler would hand it the click event — a truthy value
+              that would silently retire an employee's existing timesheet
+              without ever showing the prompt that exists to ask about it. */}
+          <button className="btn btn-primary" disabled={saving || alreadySubmitted}
+            onClick={() => submit(false)}
             aria-describedby="ts-submit-status">
-            {saving ? <><span className="spinner" /> Submitting…</>
-              : alreadySubmitted ? "Submitted ✓" : "Submit timesheet"}
+            {saving ? <><span className="spinner" /> {forSelf ? "Submitting…" : "Filing…"}</>
+              : alreadySubmitted ? (forSelf ? "Submitted ✓" : "Filed ✓")
+              : forSelf ? "Submit timesheet"
+              : isNewPerson ? "Add them and file this timesheet"
+              : `File this for ${targetName}`}
           </button>
         </div>
       </div>

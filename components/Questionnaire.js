@@ -12,6 +12,19 @@ import { APPROVAL_MIN_CONFIDENCE } from "@/lib/approval";
 //   calendar, totals   the live day array + its rollup (READ-ONLY here)
 //   approval           employee.approval / data.approval from /api/process.
 //                      null on manual entry or a flow with no approval block.
+//   onBehalf           true when an admin/HR user is filing for SOMEBODY ELSE.
+//                      Hides the four self-attestation inputs — "how many
+//                      regular/overtime hours did YOU work", "did YOU work
+//                      weekends" — and nothing else. Those questions exist to be
+//                      an INDEPENDENT check on the AI, and a person who did not
+//                      work the month cannot supply one: they would be reading
+//                      the same document a second time, and their answer would
+//                      be stored in ts_employee_edits.questionnaire as if the
+//                      worker had made it. lib/validate.js drops exactly the
+//                      matching errors (see its `onBehalf` block); every other
+//                      card here — manager approval, the US-holiday Worked /
+//                      Not-worked toggles, PTO, notes — is answerable from the
+//                      document in the admin's hand and STAYS.
 //   showErrors         true once submit has been pressed once — gates the red
 //                      "you must answer this" nag so a fresh form isn't a wall
 //                      of red.
@@ -37,6 +50,7 @@ import { APPROVAL_MIN_CONFIDENCE } from "@/lib/approval";
 export default function Questionnaire({
   q, setQ, holidays, holidayWork, setHolidayWork, calendar, totals,
   approval = null,
+  onBehalf = false,
   showErrors = false,
   onClearDayHours = null,
   onRestoreAiHours = null,
@@ -179,41 +193,59 @@ export default function Questionnaire({
   return (
     <div className="stack">
       <div className="card card-pad">
-        <h3 className="card-title">Your month at a glance</h3>
-        <div className="grid-2">
-          {/* The ids are load-bearing, not decoration: DashboardClient's
-              focusFirstProblem() jumps to these exact ids when a submit is
-              refused. Renaming one silently downgrades that jump to the
-              generic banner. */}
-          <div className="field">
-            <label htmlFor="ts-regular-hours">How many regular hours did you work?<Req /></label>
-            <input id="ts-regular-hours" type="number" step="0.25" min="0" value={q.regularHours ?? ""}
-              onChange={set("regularHours")} aria-required="true"
-              placeholder={String(totals.regular)} />
-            <span className="hint">Calendar total: {totals.regular}h</span>
+        <h3 className="card-title">
+          {onBehalf ? "This month at a glance" : "Your month at a glance"}
+        </h3>
+        {/* THE SELF-ATTESTATION QUESTIONS. Present only for the person whose
+            hours these are — see the `onBehalf` note in the props contract. */}
+        {!onBehalf && (
+          <div className="grid-2">
+            {/* The ids are load-bearing, not decoration: DashboardClient's
+                focusFirstProblem() jumps to these exact ids when a submit is
+                refused. Renaming one silently downgrades that jump to the
+                generic banner. */}
+            <div className="field">
+              <label htmlFor="ts-regular-hours">How many regular hours did you work?<Req /></label>
+              <input id="ts-regular-hours" type="number" step="0.25" min="0" value={q.regularHours ?? ""}
+                onChange={set("regularHours")} aria-required="true"
+                placeholder={String(totals.regular)} />
+              <span className="hint">Calendar total: {totals.regular}h</span>
+            </div>
+            <div className="field">
+              <label htmlFor="ts-overtime-hours">How many overtime hours did you work?<Req /></label>
+              <input id="ts-overtime-hours" type="number" step="0.25" min="0" value={q.overtimeHours ?? ""}
+                onChange={set("overtimeHours")} aria-required="true"
+                placeholder={String(totals.overtime)} />
+              <span className="hint">Calendar total: {totals.overtime}h</span>
+            </div>
           </div>
-          <div className="field">
-            <label htmlFor="ts-overtime-hours">How many overtime hours did you work?<Req /></label>
-            <input id="ts-overtime-hours" type="number" step="0.25" min="0" value={q.overtimeHours ?? ""}
-              onChange={set("overtimeHours")} aria-required="true"
-              placeholder={String(totals.overtime)} />
-            <span className="hint">Calendar total: {totals.overtime}h</span>
-          </div>
-        </div>
+        )}
+        {onBehalf && (
+          <p className="muted" style={{ marginTop: -4, marginBottom: 14, fontSize: 13 }}>
+            The “how many hours did you work?” cross-check is left out here on
+            purpose: it exists to be an independent check on what the AI read, and
+            re-typing the totals off the same document you are looking at is not
+            one. The calendar below is the record — correct it there.
+          </p>
+        )}
 
         <div className="grid-2">
+          {!onBehalf && (
+            <div className="field">
+              <label htmlFor="ts-worked-weekends">Did you work on weekends?<Req /></label>
+              <select id="ts-worked-weekends" value={q.workedWeekends || ""}
+                onChange={set("workedWeekends")} aria-required="true">
+                <option value="">Select…</option>
+                <option value="no">No</option>
+                <option value="yes">Yes</option>
+              </select>
+              <span className="hint">Calendar weekend hours: {totals.weekendHrs ?? 0}h</span>
+            </div>
+          )}
           <div className="field">
-            <label htmlFor="ts-worked-weekends">Did you work on weekends?<Req /></label>
-            <select id="ts-worked-weekends" value={q.workedWeekends || ""}
-              onChange={set("workedWeekends")} aria-required="true">
-              <option value="">Select…</option>
-              <option value="no">No</option>
-              <option value="yes">Yes</option>
-            </select>
-            <span className="hint">Calendar weekend hours: {totals.weekendHrs ?? 0}h</span>
-          </div>
-          <div className="field">
-            <label>How many holidays did you take off?</label>
+            <label>
+              {onBehalf ? "How many holidays did they take off?" : "How many holidays did you take off?"}
+            </label>
             <input type="number" min="0" value={q.holidaysTaken ?? ""}
               onChange={set("holidaysTaken")} placeholder="0" />
           </div>
@@ -238,7 +270,10 @@ export default function Questionnaire({
         </div>
 
         <div className="field" style={{ marginBottom: 0 }}>
-          <label>Additional notes for your manager (optional)</label>
+          <label>
+            {onBehalf ? "Additional notes about this month (optional)"
+                      : "Additional notes for your manager (optional)"}
+          </label>
           <textarea rows={2} value={q.notes ?? ""} onChange={set("notes")}
             placeholder="Anything reviewers should know…" />
         </div>
@@ -287,7 +322,8 @@ export default function Questionnaire({
           }}>
             <div style={{ fontWeight: 600 }}>
               {q.approvalOverride
-                ? "You said this timesheet is not approved"
+                ? (onBehalf ? "You said this timesheet is not approved"
+                            : "You said this timesheet is not approved")
                 : det
                   ? "We couldn’t find a manager approval or signature on this document"
                   : "No document was read, so no manager approval could be found"}
@@ -296,7 +332,7 @@ export default function Questionnaire({
             {hint && !q.approvalOverride && (
               <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
                 {hint.reject_reason === "self_approval"
-                  ? "The only signature we found looks like your own — an employee can’t approve their own timesheet."
+                  ? "The only signature we found looks like the employee’s own — nobody can approve their own timesheet."
                   : <>We may have seen{" "}
                       {hint.verbatim ? <>“{hint.verbatim}”</>
                         : hint.approver_name ? <>an approval by {hint.approver_name}</>
@@ -316,8 +352,15 @@ export default function Questionnaire({
                 type="checkbox" checked={ackChecked} onChange={toggleAck}
                 style={{ marginTop: 3 }} />
               <span style={{ fontSize: 13 }}>
-                I confirm this timesheet has <b>not</b> been approved by my manager,
-                and I’m submitting it anyway.
+                {/* The wording follows WHO IS ANSWERING. An admin filing on
+                    somebody's behalf cannot truthfully say "my manager", and a
+                    checkbox that puts words in their mouth is how an
+                    attestation stops meaning anything. */}
+                {onBehalf
+                  ? <>I confirm this timesheet carries <b>no</b> manager approval,
+                      and I am filing it anyway.</>
+                  : <>I confirm this timesheet has <b>not</b> been approved by my manager,
+                      and I’m submitting it anyway.</>}
               </span>
             </label>
 
@@ -348,7 +391,9 @@ export default function Questionnaire({
       {/* ---------------- US holidays ---------------- */}
       {holidayList.length > 0 && (
         <div className="card card-pad">
-          <h3 className="card-title">US holidays this month — did you work?</h3>
+          <h3 className="card-title">
+            US holidays this month — {onBehalf ? "did they work?" : "did you work?"}
+          </h3>
           <p className="muted" style={{ marginTop: -6, marginBottom: 12, fontSize: 13 }}>
             {/* Say exactly what the buttons do, including the part people lose
                 money on. AJACE does not pay a federal holiday that was not

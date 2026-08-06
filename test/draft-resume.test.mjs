@@ -197,5 +197,71 @@ const peek = await execute(stranger, {
 });
 ok("another employee sees no rows", (peek.data || []).length === 0, JSON.stringify(peek.data));
 
+// ...but a PRIVILEGED one is not stopped by the data layer, and that is the
+// whole reason the client query had to change.
+console.log("\n── 9. an admin's resume read must be scoped BY THE CLIENT ──");
+// ts_timesheets carries adminRead, and buildWhere() drops the owner predicate on
+// SELECT for an admin. So the dashboard's own period query — which used only
+// .eq(year).eq(month) and then took .single() of an UNORDERED result — could
+// hand an admin an arbitrary employee's timesheet as their own unfinished draft.
+// resumeDraft() then pointed timesheetRef at a foreign row id, after which every
+// subsequent write matched zero rows and returned error:null for ever.
+const ADM = "dddd0000-0000-0000-0000-00000000000e";
+await query(`insert into auth_users(id,email,password_hash,role) values($1,'draftadm@x.com','x','admin')
+             on conflict (id) do nothing`, [ADM]);
+await query(`insert into ts_profiles(id,email,full_name,role) values($1,'draftadm@x.com','A','admin')
+             on conflict (id) do nothing`, [ADM]);
+const adminUser = { id: ADM, email: "draftadm@x.com", role: "admin" };
+
+const adminUnscoped = await execute(adminUser, {
+  table: "ts_timesheets", op: "select", columns: "id,user_id,days,draft",
+  filters: [{ col: "year", val: YEAR }, { col: "month", val: MONTH }],
+});
+ok("an admin's UNSCOPED read really does return the employee's row",
+   (adminUnscoped.data || []).some((r2) => r2.user_id === EMP),
+   JSON.stringify((adminUnscoped.data || []).map((r2) => r2.user_id)));
+ok("...and it carries a live draft, so it WOULD have been offered as theirs",
+   (adminUnscoped.data || []).some((r2) => r2.user_id === EMP && !!r2.draft));
+
+// The query the dashboard now issues. `.eq("user_id", uid)` is a no-op for an
+// employee and load-bearing for an admin — one line, and the only thing between
+// an admin and a stranger's half-finished payroll grid.
+const adminScoped = await execute(adminUser, {
+  table: "ts_timesheets", op: "select", single: true, columns: "id,month,year,days,draft",
+  filters: [{ col: "user_id", val: ADM }, { col: "year", val: YEAR }, { col: "month", val: MONTH }],
+});
+ok("scoped by user_id, the admin is offered NOTHING to resume",
+   !adminScoped.error && adminScoped.data === null, JSON.stringify(adminScoped.data));
+const empScoped = await execute(employee, {
+  table: "ts_timesheets", op: "select", single: true, columns: "id,month,year,days,draft",
+  filters: [{ col: "user_id", val: EMP }, { col: "year", val: YEAR }, { col: "month", val: MONTH }],
+});
+ok("...and the employee still gets their own back, unchanged",
+   empScoped.data?.id === tsId && !!empScoped.data?.draft, JSON.stringify(empScoped.data?.id));
+
+// The same widening applies to the submissions the dashboard renders its
+// "⏳ Submitted — awaiting review" banner from. ts_employee_edits carries BOTH
+// adminRead and staffRead, so an admin OR HR user received every employee's
+// rows — and the banner, its hours and its review note could be somebody else's.
+const HRU = { id: "dddd0000-0000-0000-0000-00000000000f", email: "drafthr@x.com", role: "hr" };
+await query(`insert into auth_users(id,email,password_hash,role) values($1,$2,'x','hr')
+             on conflict (id) do nothing`, [HRU.id, HRU.email]);
+await query(`insert into ts_profiles(id,email,full_name,role) values($1,$2,'H','hr')
+             on conflict (id) do nothing`, [HRU.id, HRU.email]);
+for (const u of [adminUser, HRU]) {
+  const seen = await execute(u, {
+    table: "ts_employee_edits", op: "select", columns: "id,user_id",
+    filters: [{ col: "year", val: YEAR }, { col: "month", val: MONTH }],
+  });
+  ok(`an unscoped ts_employee_edits read as ${u.role} returns the employee's submissions`,
+     (seen.data || []).some((e) => e.user_id === EMP), String((seen.data || []).length));
+  const scopedSeen = await execute(u, {
+    table: "ts_employee_edits", op: "select", columns: "id,user_id",
+    filters: [{ col: "user_id", val: u.id }, { col: "year", val: YEAR }, { col: "month", val: MONTH }],
+  });
+  ok(`...and adding .eq("user_id") removes them, which is what the dashboard now sends`,
+     (scopedSeen.data || []).every((e) => e.user_id === u.id), JSON.stringify(scopedSeen.data));
+}
+
 console.log(`\n${fail === 0 ? "✅ ALL PASS" : "❌ FAILURES"}  —  ${pass} passed, ${fail} failed`);
 await pool().end(); process.exit(fail ? 1 : 0);

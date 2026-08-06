@@ -1,15 +1,17 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import Topbar from "@/components/Topbar";
 import Calendar from "@/components/Calendar";
 import DayModal from "@/components/DayModal";
 import useDialogKeys from "@/components/useDialogKeys";
 import { createClient } from "@/lib/api/client";
 import { periodLabel, defaultPeriod as processingPeriod, MONTHS } from "@/lib/month";
-import { rollup, buildCalendar } from "@/lib/engine";
-import TimesheetTargetPicker, { Req } from "@/components/TimesheetTargetPicker";
-import { EMPTY_PICK, resolveTarget, targetKey } from "@/lib/roster";
+import { rollup } from "@/lib/engine";
+// Only the required-field marker survives here: "who is this timesheet
+// for?" now lives on the timesheet tab, with the rest of the filing flow.
+import { Req } from "@/components/TimesheetTargetPicker";
 // The SAME predicates the server enforces with (lib/aws/roles.js is pure, so it
 // bundles into a client component untouched). Re-typing `role === "admin"` here
 // is how a screen ends up disagreeing with the route it posts to.
@@ -69,7 +71,6 @@ export default function AdminClient({ profile, profiles, edits, files, adminEdit
   const [tab, setTab] = useState("submissions");
   const [detail, setDetail] = useState(null);
   const [bucket, setBucket] = useState("all");
-  const [adding, setAdding] = useState(false);
   // Filing in someone else's name — and adding a person — is privileged, so the
   // trigger is not shown to anyone who would be refused. The page guard and the
   // server route are the gates that MATTER; this only keeps the button honest.
@@ -154,7 +155,6 @@ export default function AdminClient({ profile, profiles, edits, files, adminEdit
   }, [autoPeriod, periods, period, pickedPeriod]);
 
   const label = (p) => `${MONTHS[p.month - 1]} ${p.year}`;
-  const selected = periods.find((p) => p.key === period) || null;
 
   const inPeriod = (x) => period === "all" || `${x.year}-${x.month}` === period;
   const pEdits = edits.filter(inPeriod);
@@ -284,14 +284,26 @@ export default function AdminClient({ profile, profiles, edits, files, adminEdit
             <p className="muted">
               {reviewer
                 ? "Review employee submissions, audit edits, and make corrections."
-                : "File timesheets on behalf of staff and register new people. Approving, correcting and payroll export are an admin's."}
+                : "See who has filed and who still owes you a timesheet. Filing on somebody's behalf — with the document upload and AI extraction — is on the timesheet tab. Approving, correcting and payroll export are an admin's."}
             </p>
           </div>
           <div className="row" style={{ gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
+            {/* A LINK, NOT NOTHING. Filing moved to the timesheet tab, where it
+                gets the document upload, the AI extraction and the review grid
+                this console's modal never had. But HR's ONLY reasons to be on
+                this page are filing and registering people (app/admin/page.js
+                lets them through on canFileForOthers precisely for that), so
+                deleting the affordance with no signpost would strand a whole
+                role on a console whose review, export and files features all
+                refuse them.
+
+                `for=other` sets the picker's MODE and nothing else — a
+                non-identifying enum. An employee id never appears in a URL; it
+                is only ever chosen in the dropdown. */}
             {canFile && (
-              <button className="btn btn-primary btn-sm" onClick={() => setAdding(true)}>
-                + Add a timesheet
-              </button>
+              <Link className="btn btn-primary btn-sm" href="/dashboard?for=other">
+                File a timesheet
+              </Link>
             )}
             {periods.length > 0 && (
               <div className="field" style={{ margin: 0, minWidth: 190 }}>
@@ -597,15 +609,6 @@ export default function AdminClient({ profile, profiles, edits, files, adminEdit
         )}
       </div>
 
-      {adding && canFile && (
-        <AddTimesheetModal
-          api={api} roster={roster} people={profiles} adminProfile={profile}
-          initialPeriod={selected}
-          onClose={() => setAdding(false)}
-          onSaved={() => { setAdding(false); setPickedPeriod(true); router.refresh(); }}
-        />
-      )}
-
       {detail && (
         <SubmissionDetail
           edit={detail} profile={pmap[detail.user_id] || {}} adminProfile={profile}
@@ -633,355 +636,6 @@ function AiDot({ verdict }) {
     <span title={AI_LABEL[verdict]} aria-label={AI_LABEL[verdict]}
       style={{ width: 8, height: 8, borderRadius: "50%", background: color,
                display: "inline-block", flex: "0 0 auto" }} />
-  );
-}
-
-// ---------------------------------------------------------------------------
-// ITEM 1 — an admin (or HR) files a timesheet for MYSELF, for an EXISTING
-// person, or for a person who does not exist yet.
-//
-// This deliberately does NOT go through /api/data: lib/aws/data.js forces the
-// owner column to the caller, so a write for someone else lands on the admin's
-// own record. It posts to /api/admin/timesheet, which re-checks the caller's
-// role on the server, derives the hours from `days`, retires any existing
-// current row for that person+month, and stamps the row so it is
-// distinguishable from something the employee submitted themselves.
-//
-// "Who is this for?" lives in <TimesheetTargetPicker/>, which resolves the three
-// answers into ONE `target`. Everything below — the POST body, the supersede
-// prompt, the footer — reads that single object, because a screen that says one
-// name while posting another id is how the wrong person gets paid.
-// ---------------------------------------------------------------------------
-function AddTimesheetModal({ api, roster, people, adminProfile, initialPeriod, onClose, onSaved }) {
-  const dp = processingPeriod();
-  const [who, setWho] = useState(EMPTY_PICK);      // {mode, pick, newName, newEmail}
-  const [month, setMonth] = useState(initialPeriod?.month || dp.month);
-  const [year, setYear] = useState(initialPeriod?.year || dp.year);
-  const [client, setClient] = useState("");
-  const [note, setNote] = useState("");
-  const [days, setDays] = useState([]);
-  const [dayIdx, setDayIdx] = useState(null);
-  const [file, setFile] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const [emailErr, setEmailErr] = useState("");    // the server's verdict on a new person's email
-  const [conflict, setConflict] = useState(null);  // existing rows to supersede
-  // The server's namesake verdict. `people` here is a page-load-old snapshot, so
-  // a person a colleague registered five minutes ago is invisible to the browser
-  // check and only the server sees the clash — this puts its answer on the panel
-  // beside the name field instead of in a generic red banner at the bottom.
-  const [sameNameFromServer, setSameNameFromServer] = useState(null);
-  const dialogRef = useDialogKeys(onClose);
-  // Both server verdicts about a new person render inside the picker, which sits
-  // at the TOP of the modal body; the button that triggers them is ~1500px below
-  // it, past the note field, the tiles and a six-row calendar. Without this the
-  // only feedback on a 409 is off-screen and pressing "Add them and file this
-  // timesheet" looks like it did nothing. The scroller is .modal-body, not the
-  // page, so this is scrollIntoView rather than the window-scrolling
-  // focusFirstProblem() the employee dashboard uses.
-  const pickerRef = useRef(null);
-  useEffect(() => {
-    if (!emailErr && !sameNameFromServer) return;
-    pickerRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
-  }, [emailErr, sameNameFromServer]);
-
-  const target = useMemo(
-    () => resolveTarget(who, { roster, people, self: adminProfile }),
-    [who, roster, people, adminProfile]
-  );
-  const creatingPerson = who.mode === "new";
-  const key = targetKey(target);
-
-  useEffect(() => {
-    if (target?.client && !client) setClient(target.client);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
-
-  // The server's "that address is taken" verdict is about ONE address. The
-  // moment the admin edits it, the message is about something they no longer
-  // typed, so it has to go.
-  useEffect(() => { setEmailErr(""); }, [who.newEmail]);
-  // Same rule for the namesake list: it is the answer to ONE name. Editing the
-  // name (or switching who this is for) makes it an answer to a question nobody
-  // asked, and a stale "already registered" list is how an admin gets talked out
-  // of adding a person who genuinely isn't there.
-  useEffect(() => { setSameNameFromServer(null); }, [who.newName, who.mode]);
-
-  // A document is stored under the EMPLOYEE's id prefix, and a person who does
-  // not exist yet has no id — so there is nothing to attach it to. Drop any file
-  // already chosen rather than silently filing it against the wrong person.
-  useEffect(() => { if (creatingPerson) setFile(null); }, [creatingPerson]);
-
-  // A conflict is about one specific person+month; changing either makes the
-  // "replace it" prompt stale, and acting on a stale prompt would supersede a
-  // timesheet the admin never looked at.
-  useEffect(() => { setConflict(null); }, [key, month, year]);
-
-  // Rebuild the (empty) month grid whenever the period changes, so weekends and
-  // US holidays are marked exactly as they are on the employee's own screen.
-  useEffect(() => {
-    setDays(buildCalendar(null, Number(month), Number(year)));
-  }, [month, year]);
-
-  const totals = rollup(days);
-
-  // WHAT HAPPENS TO THIS ROW WHEN IT LANDS — mirrored from the route's `status`
-  // block (app/api/admin/timesheet/route.js: `const approved = !forSelf &&
-  // canReview(user)`), using the same predicate module, because telling an HR
-  // user their filing is "approved and payable" when it is actually queued for
-  // an admin's review is a lie about somebody's wages.
-  //   admin, for someone else -> approved and payable now
-  //   HR, for someone else    -> submitted, waits for an admin
-  //   anyone, for themselves  -> submitted; nobody approves their own wages
-  const willBeApproved = !!target && target.kind !== "self" && canReview(adminProfile);
-
-  // The note is the only human record of hours nobody self-reported, so the
-  // server REQUIRES it when filing on someone else's behalf and deliberately
-  // does not for your own. Demanding one for your own hours only teaches people
-  // to type "." to get past it, so this matches the route rather than being
-  // stricter than it for the sake of looking careful.
-  const noteRequired = !!target && target.kind !== "self";
-  const noteOk = !noteRequired || note.trim().length >= 3;
-  const ready = !!target && noteOk && totals.total > 0;
-
-  async function submit(supersede) {
-    if (!target) return;
-    setBusy(true); setErr(""); setEmailErr("");
-    try {
-      // The document (if any) is stored under the EMPLOYEE's prefix, which
-      // /api/storage/upload already allows an admin to write to. That keeps the
-      // employee able to read their own source file and keeps the console's
-      // per-employee file lookup working unchanged. A person being created in
-      // this same request has no id yet, so there is no prefix to write to and
-      // the file input is disabled for that case.
-      let filePayload = null;
-      if (file && target.id) {
-        const ext = (file.name.split(".").pop() || "dat").toLowerCase();
-        const path = `${target.id}/${year}-${String(month).padStart(2, "0")}/${Date.now()}.${ext}`;
-        const { error: upErr } = await api.storage.from("ts-uploads").upload(path, file);
-        if (upErr) throw new Error(upErr.message || "couldn't upload that document");
-        filePayload = { path, name: file.name, mime: file.type || null, size: file.size || null };
-      }
-      // ONE request, whether or not a person has to be created first. `for:"new"`
-      // makes the route register the person INSIDE the same transaction as the
-      // filing, so a failure anywhere rolls the person back too. Creating them
-      // with a separate POST /api/admin/people first would leave an orphan
-      // payroll record behind every time the filing then failed, and no client
-      // can make two HTTP calls atomic.
-      //
-      // Note what is NOT sent: no role, and no totals. The route ignores client
-      // totals and derives them from `days`; `newPerson` has no role key to aim
-      // at, and lib/aws/people.js writes 'employee' as a literal.
-      const res = await fetch("/api/admin/timesheet", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          for: target.kind === "self" ? "self" : target.kind === "new" ? "new" : "existing",
-          // Ignored by the route in self/new mode; sent only for "existing".
-          employeeUserId: target.kind === "existing" ? target.id : null,
-          newPerson: target.kind === "new"
-            ? { full_name: target.name, email: target.email, client: client || null,
-                // The payroll import's match key. Sent because it is guarded —
-                // the server refuses a code that belongs to somebody else, and
-                // the export refuses a period in which two people share one.
-                employee_code: target.code || null,
-                // The admin's answer to "somebody of this name already exists".
-                // Absent/false means the question has not been answered and the
-                // server asks it (409 needsDistinctConfirmation).
-                confirmDistinctPerson: target.confirmDistinct === true }
-            : null,
-          year: Number(year), month: Number(month),
-          days, note: note.trim(), supersede: !!supersede,
-          fields: { client: client || null },
-          questionnaire: { enteredByAdmin: true, adminEmail: adminProfile?.email || null },
-          file: filePayload,
-        }),
-      });
-      const j = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        if (j.needsSupersede) { setConflict(j.existing || []); setBusy(false); return; }
-        // "Somebody of this name is already registered" — a question, not a
-        // failure. Put the people the server found onto the panel so the admin
-        // can see WHO they might be duplicating and either pick them or say this
-        // is a different human. Nothing was written: the route rolled the whole
-        // filing back, person included.
-        if (j.needsDistinctConfirmation) {
-          setSameNameFromServer(j.sameName || []); setBusy(false); return;
-        }
-        const msg = j.error || "couldn't file this timesheet";
-        // A clashing employee code is about ONE field too, and it is the field a
-        // payroll import matches on — so it belongs beside that input, not in a
-        // banner. Checked BEFORE the email branch: its message mentions the
-        // person's email, which the /e-?mail/ test below would otherwise claim.
-        if (target.kind === "new" && j.duplicateEmployeeCode) {
-          setErr(`${msg}${j.hint ? ` ${j.hint}` : ""}`); setBusy(false); return;
-        }
-        // A clashing or malformed address is a fixable mistake about ONE field,
-        // not a failed filing — put it on that field so the admin can correct it
-        // where they typed it. `duplicateEmail` is the route's own marker; the
-        // text match additionally catches PersonInputError's 400s, which are
-        // about the email or the name and carry no code.
-        if (target.kind === "new" && (j.duplicateEmail || /e-?mail/i.test(msg))) {
-          setEmailErr(j.hint ? `${msg} ${j.hint}` : msg); setBusy(false); return;
-        }
-        throw new Error(msg);
-      }
-      setBusy(false);
-      onSaved();
-    } catch (e) {
-      setBusy(false);
-      setErr(String(e.message || e));
-    }
-  }
-
-  return (
-    <div className="modal-bg" onClick={onClose}>
-      <div className="modal wide" ref={dialogRef} onClick={(e) => e.stopPropagation()}
-           role="dialog" aria-modal="true" aria-label="Add a timesheet">
-        <div className="modal-head">
-          <div>
-            <h3 style={{ fontSize: 16 }}>Add a timesheet</h3>
-            <div className="muted" style={{ fontSize: 12 }}>
-              {target?.kind === "self"
-                ? "Filed in your own name, like any other employee submission."
-                : "Filed in the employee’s name, signed by you, and marked “entered by admin”."}
-            </div>
-          </div>
-          <button className="x" onClick={onClose} aria-label="Close">×</button>
-        </div>
-        <div className="modal-body">
-          <div ref={pickerRef}>
-            <TimesheetTargetPicker
-              value={who} onChange={setWho}
-              roster={roster} people={people} self={adminProfile}
-              serverEmailError={emailErr}
-              serverSameName={sameNameFromServer}
-            />
-          </div>
-
-          <div className="grid-2">
-            <div className="field">
-              <label>Period <Req /></label>
-              <div className="row" style={{ gap: 8 }}>
-                <select value={month} onChange={(e) => setMonth(Number(e.target.value))}>
-                  {MONTHS.map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
-                </select>
-                <select value={year} onChange={(e) => setYear(Number(e.target.value))}>
-                  {[dp.year + 1, dp.year, dp.year - 1, dp.year - 2].map((y) => (
-                    <option key={y} value={y}>{y}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-            <div className="field">
-              <label>Client</label>
-              <input value={client} onChange={(e) => setClient(e.target.value)} placeholder="optional" />
-            </div>
-            <div className="field">
-              <label>Source document</label>
-              <input type="file" disabled={creatingPerson}
-                     onChange={(e) => setFile(e.target.files?.[0] || null)} />
-              <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-                {creatingPerson
-                  ? "Not available while adding a new person — a document is stored against " +
-                    "their record, which doesn’t exist until you file this. File it, then " +
-                    "attach the document by filing again over the top."
-                  : "Optional. Stored against the employee so they can see it too."}
-              </div>
-            </div>
-          </div>
-
-          <div className="field">
-            <label>
-              {noteRequired
-                ? <>Why are you filing this for them? <Req /></>
-                : "Note (optional)"}
-            </label>
-            <input value={note} onChange={(e) => setNote(e.target.value)}
-                   placeholder={noteRequired
-                     ? "e.g. Paper timesheet handed in on 3 Aug — employee has no laptop access"
-                     : "optional — anything payroll should know about this month"} />
-            <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-              {noteRequired
-                ? (willBeApproved
-                    ? "Required. These hours are payable without anyone else reviewing them, so this " +
-                      "note and the audit entry are the only record of why they exist."
-                    : "Required. Nobody else has seen these hours yet — this note is what the admin " +
-                      "reviewing them will read.")
-                : "Not required for your own hours — they go to review like anyone else’s."}
-            </div>
-          </div>
-
-          <div className={"tiles" + (Number(totals.other) > 0 ? " tiles-5" : "")} style={{ margin: "16px 0" }}>
-            <div className="tile reg"><div className="v">{totals.regular}</div><div className="l">Regular</div></div>
-            <div className="tile ot"><div className="v">{totals.overtime}</div><div className="l">Overtime</div></div>
-            {/* Paid but not worked (holiday pay / PTO / sick). Shown only when
-                there is some, but shown WHENEVER there is: it is part of Total,
-                so without it these tiles read "2 + 0 = 10". */}
-            {Number(totals.other) > 0 ? (
-              <div className="tile"><div className="v">{totals.other}</div>
-                <div className="l">Other (paid, not worked)</div></div>
-            ) : null}
-            <div className="tile tot"><div className="v">{totals.total}</div><div className="l">Total</div></div>
-            <div className="tile"><div className="v">{totals.daysWorked}</div><div className="l">Days worked</div></div>
-          </div>
-          <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
-            These are a preview. The hours that get stored are recomputed on the server from the
-            day entries below — the totals shown here are never posted.
-          </div>
-
-          <h3 className="card-title">Hours — click a day to enter them <Req /></h3>
-          <Calendar calendar={days} month={Number(month)} year={Number(year)} onDayClick={setDayIdx} />
-
-          {err && <div className="alert error" style={{ margin: "12px 0" }}>{err}</div>}
-
-          {conflict && (
-            <div className="alert warn" style={{ margin: "12px 0" }}>
-              <div>
-                <b>{target?.name || "This employee"} already has a timesheet for {MONTHS[month - 1]} {year}</b>
-                {" "}({conflict.map((c) => c.status).join(", ")}).
-                Filing yours will mark {conflict.length === 1 ? "it" : "them"} as <b>replaced</b>, so payroll
-                still sees exactly one timesheet for this month. The replaced {conflict.length === 1 ? "row stays" : "rows stay"} visible
-                under the “Replaced” bucket.
-                <div style={{ marginTop: 10 }}>
-                  <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => submit(true)}>
-                    {busy ? "Filing…" : "Replace it and file mine"}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          <div className="between" style={{ marginTop: 8 }}>
-            <span className="muted" style={{ fontSize: 12 }}>
-              {!target
-                ? "Choose who this timesheet is for before filing it."
-                : willBeApproved
-                  ? <>Filed as <b>approved and payable</b>, in <b>{target.name}</b>’s name
-                      {target.kind === "new" ? ", who is added to payroll in the same step" : ""}.</>
-                  : target.kind === "self"
-                    ? <>Filed in your own name and sent for <b>review</b> — nobody approves their own hours.</>
-                    : <>Filed in <b>{target.name}</b>’s name
-                        {target.kind === "new" ? ", who is added to payroll in the same step" : ""},
-                        and sent for <b>review</b>: HR enters hours, an admin approves them.</>}
-            </span>
-            <div className="row">
-              <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-              <button className="btn btn-primary" disabled={!ready || busy || !!conflict}
-                      onClick={() => submit(false)}>
-                {busy
-                  ? (target?.kind === "new" ? "Adding & filing…" : "Filing…")
-                  : (target?.kind === "new" ? "Add them and file this timesheet" : "File this timesheet")}
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {dayIdx != null && (
-        <DayModal day={days[dayIdx]} onClose={() => setDayIdx(null)}
-          onSave={(upd) => { const n = days.slice(); n[dayIdx] = upd; setDays(n); setDayIdx(null); }} />
-      )}
-    </div>
   );
 }
 

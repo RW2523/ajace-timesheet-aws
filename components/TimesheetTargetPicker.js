@@ -44,6 +44,13 @@ const radioRow = {
 
 export default function TimesheetTargetPicker({
   value, onChange, roster = [], people = [], self = null, serverEmailError = "",
+  // The SERVER's verdict on the employee code, for exactly the same reason as
+  // the email one: `people` is a page-load-old snapshot, so a code claimed by a
+  // colleague five minutes ago is invisible here and only the server sees the
+  // clash. It is the column a payroll import matches people on — two records
+  // sharing one is one code paid twice — so its answer belongs beside the input
+  // it is about, not in a banner somewhere else on the page.
+  serverCodeError = "",
   // The SERVER's namesake verdict. `people` is a snapshot taken when the console
   // rendered, so a person added by a colleague two minutes ago is not in it —
   // the browser sees no clash, the server does, and this is how its answer gets
@@ -74,7 +81,10 @@ export default function TimesheetTargetPicker({
     : null;
   const emailIssue = serverEmailError || localEmailIssue;
   const nameTooShort = v.mode === "new" && clean(v.newName).length > 0 && clean(v.newName).length < 2;
-  const codeIssue = v.mode === "new" ? codeProblem(v.newCode, people) : null;
+  // The server's answer wins when it has one: it read the table this instant.
+  const codeIssue = v.mode === "new"
+    ? (serverCodeError || codeProblem(v.newCode, people))
+    : null;
   // Everyone already registered under this name. NOT an error — the question in
   // NewPersonPanel. `people` (not `roster`) on purpose: a duplicate is most often
   // made of a leaver or an admin, and those are exactly who the roster hides.

@@ -1,9 +1,14 @@
 #!/usr/bin/env node
 // "Who is this timesheet for?" — the rule, and the wiring around it.
 //
-// WHY THIS EXISTS: this is the only screen in the app that can write hours onto
+// WHY THIS EXISTS: this is the only control in the app that can write hours onto
 // a payroll record that is NOT the caller's own, and it can now also bring a
-// brand-new person into existence. Two things can go wrong silently:
+// brand-new person into existence. It used to live in the admin console's
+// "+ Add a timesheet" modal; that modal is gone and the control moved to the
+// one filing screen (components/DashboardClient.js), so an admin filing for
+// somebody gets the same document upload, AI extraction and review grid an
+// employee gets. The RULE below is unchanged by that move, which is the point
+// of keeping it in a JSX-free module. Two things can go wrong silently:
 //
 //   1. THE RULE. resolveTarget() decides whose id ends up in the POST body. If
 //      it returns a target while the form is still incomplete, the submit button
@@ -17,14 +22,15 @@
 //      test/questionnaire-contract.test.mjs.
 //
 // Part 1 EXECUTES the rule (lib/roster.js is deliberately JSX-free so it can be
-// imported directly). Part 2 reads the AST, because prop mismatches are not
-// observable at runtime without a DOM.
+// imported directly). The WIRING checks moved with the control, into
+// test/filing-route.test.mjs — which asserts the prop contract in its new home
+// AND the thing that only exists now that both flows share one screen: which
+// endpoint a given set of hours is sent to.
 //
 // Needs no database, no network and no build.
 //
 // Run:  node test/target-picker.test.mjs
 
-import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,8 +44,6 @@ import {
 // test instead of becoming a scattered 403 the user reads as a data bug.
 import { canFileForOthers, canReview } from "../lib/aws/roles.js";
 
-const require = createRequire(import.meta.url);
-const { parse } = require("next/dist/compiled/babel/parser");
 const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 
 let passed = 0;
@@ -214,169 +218,34 @@ ok("HR cannot review, so HR can never be shown the 'payable' copy",
    canReview({ role: "hr" }) === false);
 
 // ===========================================================================
-// PART 2 — the wiring, from the AST
+// PART 2 — where this control now LIVES
 // ===========================================================================
-console.log("\n— the picker's prop contract and the admin-only gate");
+// The console's "+ Add a timesheet" modal is gone. There is one filing screen,
+// components/DashboardClient.js, and it hosts this picker — so the wiring
+// assertions that used to point at AdminClient point there instead. They were
+// not deleted: they are the checks that keep the merge safe in its new home,
+// and they now live in test/filing-route.test.mjs, which additionally asserts
+// the thing that only matters now that both flows share a screen — WHICH
+// ENDPOINT a set of hours is sent to.
+//
+// What stays here is this file's own subject: the RULE, executed above, and the
+// two facts about its host that belong beside the rule rather than beside the
+// plumbing.
+console.log("\n— the rule's host");
 
-function ast(rel) {
-  return parse(readFileSync(join(ROOT, rel), "utf8"), {
-    sourceType: "unambiguous", plugins: ["jsx"], errorRecovery: false,
-  });
-}
-function walk(node, visit) {
-  if (!node || typeof node.type !== "string") return;
-  visit(node);
-  for (const key of Object.keys(node)) {
-    if (key === "loc" || key === "leadingComments" || key === "trailingComments") continue;
-    const v = node[key];
-    if (Array.isArray(v)) { for (const c of v) if (c && typeof c.type === "string") walk(c, visit); }
-    else if (v && typeof v.type === "string") walk(v, visit);
-  }
-}
-function objectParamNames(fnNode) {
-  const p = fnNode?.params?.[0];
-  if (!p || p.type !== "ObjectPattern") return null;
-  const names = []; let rest = false;
-  for (const prop of p.properties) {
-    if (prop.type === "RestElement") { rest = true; continue; }
-    if (prop.key?.type === "Identifier") names.push(prop.key.name);
-  }
-  return { names: [...new Set(names)].sort(), rest };
-}
-function findFunction(tree, name) {
-  let found = null;
-  walk(tree, (n) => {
-    if (found) return;
-    if ((n.type === "FunctionDeclaration" || n.type === "FunctionExpression") && n.id?.name === name) found = n;
-  });
-  return found;
-}
-function usagesOf(tree, name) {
-  const out = [];
-  walk(tree, (n) => {
-    if (n.type === "JSXOpeningElement" && n.name?.type === "JSXIdentifier" && n.name.name === name) out.push(n);
-  });
-  return out;
-}
-function propsOf(el) {
-  const names = []; let spread = false;
-  for (const a of el?.attributes || []) {
-    if (a.type === "JSXSpreadAttribute") { spread = true; continue; }
-    if (a.type === "JSXAttribute" && a.name?.type === "JSXIdentifier") names.push(a.name.name);
-  }
-  return { names: [...new Set(names)].sort(), spread };
-}
-
-const adminTree = ast("components/AdminClient.js");
-const pickerTree = ast("components/TimesheetTargetPicker.js");
-
-// ---- <TimesheetTargetPicker> : caller vs callee -----------------------------
-const picker = findFunction(pickerTree, "TimesheetTargetPicker");
-ok("TimesheetTargetPicker.js exports a TimesheetTargetPicker function", !!picker);
-const declared = picker ? objectParamNames(picker) : null;
-ok("the picker destructures a single props object", !!declared);
-ok("the picker uses no rest element (contract stays explicit)", declared ? declared.rest === false : false);
-
-const pickerUses = usagesOf(adminTree, "TimesheetTargetPicker");
-ok("AdminClient renders <TimesheetTargetPicker> exactly once", pickerUses.length === 1, `found ${pickerUses.length}`);
-const pickerPassed = propsOf(pickerUses[0]);
-ok("the picker call site uses no {...spread}", pickerPassed.spread === false);
-
-const dNames = declared?.names || [];
-const ignored = pickerPassed.names.filter((p) => !dNames.includes(p));
-const unwired = dNames.filter((d) => !pickerPassed.names.includes(d));
-ok("no picker prop is PASSED but never destructured (React drops it in silence)",
-   ignored.length === 0, ignored.join(", "));
-ok("no picker prop is DECLARED but never passed (its default would silently win)",
-   unwired.length === 0, unwired.join(", "));
-
-// The two that carry payroll consequences if they go missing.
-ok("`people` is wired to the picker (else a duplicate email is only caught by the server, as an error the admin can't act on)",
-   pickerPassed.names.includes("people") && dNames.includes("people"));
-ok("`self` is wired to the picker (else the MYSELF option has nobody to be)",
-   pickerPassed.names.includes("self") && dNames.includes("self"));
-
-// ---- <AddTimesheetModal> : caller vs callee ---------------------------------
-const modal = findFunction(adminTree, "AddTimesheetModal");
-ok("AdminClient has an AddTimesheetModal function", !!modal);
-const modalDeclared = modal ? objectParamNames(modal) : null;
-const modalUses = usagesOf(adminTree, "AddTimesheetModal");
-ok("AdminClient renders <AddTimesheetModal> exactly once", modalUses.length === 1, `found ${modalUses.length}`);
-const modalPassed = propsOf(modalUses[0]);
-const mNames = modalDeclared?.names || [];
-ok("no AddTimesheetModal prop is passed-but-unread or declared-but-unpassed",
-   modalPassed.names.join(",") === mNames.join(","),
-   `passed [${modalPassed.names}] vs declared [${mNames}]`);
-
-// ---- the admin/hr gate on the trigger ---------------------------------------
-// Both the button and the modal must sit behind the SAME predicate. A gate on
-// only one of them is a modal an employee can still reach.
-const src = readFileSync(join(ROOT, "components/AdminClient.js"), "utf8");
-ok("the trigger button is rendered behind the canFile gate",
-   /\{canFile && \(\s*\n\s*<button/.test(src));
-ok("the modal itself is ALSO behind the gate, not just the button that opens it",
-   /\{adding && canFile && \(/.test(src));
-ok("the gate is the shared predicate, not a hand-rolled role comparison",
-   /canFile = canFileForOthers\(/.test(src));
-ok("AdminClient contains no bare role === \"admin\" test guarding the filing feature",
-   !/canFile\s*=\s*[^;]*role\s*===\s*"admin"/.test(src));
-
-// ---- the POST body matches the route contract, field for field --------------
-// These are read off app/api/admin/timesheet/route.js. A client that posts
-// `newEmployee` to a route reading `newPerson` gets mode "existing" with a null
-// employeeUserId — a 400, or worse a filing against the wrong person.
+const dashSrc = readFileSync(join(ROOT, "components/DashboardClient.js"), "utf8");
+const adminSrc = readFileSync(join(ROOT, "components/AdminClient.js"), "utf8");
 const routeSrc = readFileSync(join(ROOT, "app/api/admin/timesheet/route.js"), "utf8");
-const body = src.slice(src.indexOf('fetch("/api/admin/timesheet"'),
-                       src.indexOf('fetch("/api/admin/timesheet"') + 1400);
 
-ok("the modal posts to /api/admin/timesheet (not /api/data, which forces the owner to the caller)",
-   /fetch\("\/api\/admin\/timesheet"/.test(src));
-ok("the route reads a `for` mode and the client sends one",
-   /body\.for/.test(routeSrc) && /\bfor:\s*target\.kind === "self"/.test(body));
-ok("the client's three modes are exactly the route's three modes",
-   ["self", "existing", "new"].every((m) => body.includes(`"${m}"`))
-   && /const MODES = \["self", "existing", "new"\]/.test(routeSrc));
-ok("a NEW person is sent as `newPerson` — the key the route actually reads",
-   /newPerson:\s*target\.kind === "new"/.test(body) && /body\.newPerson/.test(routeSrc));
-ok("that person is created in the SAME transaction as the filing (no orphan on failure)",
-   /createPersonTx\(client, newPerson\)/.test(routeSrc));
-ok("employeeUserId is sent ONLY for an existing person",
-   /employeeUserId:\s*target\.kind === "existing" \? target\.id : null/.test(body));
-// The whole `newPerson:` value, brace-matched rather than "the next 160
-// characters". The window version passed only while the literal stayed short:
-// adding one commented field to it (employee_code) pushed the closing brace out
-// of range and the assertion failed on a payload that was still perfectly
-// correct. A security check that breaks when a comment is added gets deleted by
-// the next person who hits it. This reads the actual value and is STRICTER than
-// what it replaces — it covers the entire literal however long it grows, and it
-// additionally asserts no role key anywhere else in the POST body.
-const newPersonLiteral = (() => {
-  const i = body.indexOf("newPerson:");
-  if (i < 0) return "";
-  const open = body.indexOf("{", i);
-  if (open < 0) return "";
-  let depth = 0;
-  for (let j = open; j < body.length; j++) {
-    if (body[j] === "{") depth++;
-    else if (body[j] === "}" && --depth === 0) return body.slice(i, j + 1);
-  }
-  return "";
-})();
-ok("newPerson carries NO role key — the client cannot ask for an admin account",
-   newPersonLiteral.length > 0 && !/\brole\b/.test(newPersonLiteral)
-   && !/\brole\s*:/.test(body), newPersonLiteral);
-ok("no totals are posted — the server derives them from `days`",
-   !/\b(regular|overtime|total):/.test(body));
-ok("the duplicate-email 409 is detected by the route's own `duplicateEmail` marker",
-   /j\.duplicateEmail/.test(src) && /duplicateEmail: e\.email/.test(routeSrc));
-ok("the file input is disabled while adding a person (the route 400s on a file with no owner id)",
-   /disabled=\{creatingPerson\}/.test(src)
-   && /attach the document after the person is registered/.test(routeSrc));
-ok("the note is required exactly when the route requires it (on someone else's behalf, not your own)",
-   /noteRequired = !!target && target\.kind !== "self"/.test(src)
-   && /if \(!forSelf && note\.length < 3\)/.test(routeSrc));
+ok("the filing screen imports resolveTarget — the rule executed above IS the one it uses",
+   /import \{ EMPTY_PICK, resolveTarget, nameKey \} from "@\/lib\/roster"/.test(dashSrc));
+ok("...and seeds the picker at MYSELF, without mutating EMPTY_PICK's own contract",
+   /useState\(\{ \.\.\.EMPTY_PICK, mode: "self" \}\)/.test(dashSrc));
+ok("the gate is the shared predicate, not a hand-rolled role comparison",
+   /const canFile = canFileForOthers\(profile\);/.test(dashSrc));
+ok("the console no longer contains a second filing flow", !/AddTimesheetModal/.test(adminSrc));
 ok("the footer's approved/queued copy is derived from canReview, like the route's status",
-   /willBeApproved = .*target\.kind !== "self" && canReview\(adminProfile\)/.test(src)
+   /const willBeApproved = !!target && !forSelf && canReview\(profile\)/.test(dashSrc)
    && /const approved = !forSelf && canReview\(user\)/.test(routeSrc));
 
 // ------------------------------------------------------------------- summary

@@ -17,7 +17,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # be able to colour the data the earlier tests read. It needs the database and
 # must never be skippable — it is what proves that a payroll-only record cannot
 # log in, that only admin/HR can create one, and that one is always an employee.
-SUITE=(data-layer review-flow derived-totals derivation-escape draft-resume corrected-grid fields-provenance people-registration)
+# onbehalf-filing sits beside people-registration for the same reason: it imports
+# and EXECUTES the real route handlers, and it files timesheets, so it must not be
+# able to colour the data the earlier tests read. It is what proves that an admin
+# filing for an employee lands the row on the EMPLOYEE's id (not the admin's),
+# that the source document ends up somewhere the employee can actually read, that
+# an ordinary employee is refused on every door, that an admin's own filing still
+# waits for review, and that HR may file but may not approve.
+SUITE=(data-layer review-flow derived-totals derivation-escape draft-resume corrected-grid fields-provenance people-registration onbehalf-filing)
 
 # Syntax gate first: needs no database, so it runs even when the DB checks
 # below would abort. Do NOT replace this with `node --check`: on Node >= 20 a
@@ -50,6 +57,21 @@ node "$ROOT/test/questionnaire-contract.test.mjs"
 # two separate calls would leave an orphan payroll record behind on failure.
 # Needs no database.
 node "$ROOT/test/target-picker.test.mjs"
+# filing-route is the other half of that, and the one the merge created. There is
+# now ONE filing screen for everybody, so ONE screen decides whether a set of
+# hours goes to /api/data (which FORCES the owner column to the caller) or to
+# /api/admin/timesheet (which files it against the chosen person). Getting that
+# backwards is silent in the direction that matters: an on-behalf filing sent to
+# /api/data returns 200 and pays the admin. This executes the rule, executes the
+# one validation gate deliberately relaxed on the on-behalf path, and reads the
+# wiring from the AST. Needs no database.
+node "$ROOT/test/filing-route.test.mjs"
+# ...and this one executes the AI verdict receipt, which two routes now write
+# through. A receipt proves the AI ran for ONE person, and it must be verified
+# against the CALLER — on an on-behalf filing the admin holds it and the employee
+# has never touched /api/process. Verifying it against the target instead is one
+# identifier away and would turn the stamp into a bearer token. Needs no database.
+node "$ROOT/test/ai-fields.test.mjs"
 # ...and this one RENDERS the picker (react-dom/server, no browser) to check the
 # sentences an admin actually reads: that an unmatched name offers "add them"
 # rather than silently doing nothing, and that the new-person panel still says

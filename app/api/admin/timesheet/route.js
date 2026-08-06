@@ -11,6 +11,16 @@ import { deriveTotalsStrict, HoursRangeError } from "@/lib/hours";
 import { canFileForOthers, canReview, isSelfFiling } from "@/lib/aws/roles";
 import { createPersonTx, normalisePerson, DuplicateEmailError,
          DuplicateEmployeeCodeError, NamesakeError, PersonInputError } from "@/lib/aws/people";
+// THE AI VERDICT RECEIPT. This route used to hardcode review_status/flow/
+// agent_trace to null and ai_status to 'manual' on the premise that no AI ever
+// ran behind it — true while filing on somebody's behalf meant typing 31 days
+// into a modal by hand. It is not true since the two filing flows were merged:
+// an admin now uploads a document, the AI reads it, and they review the result
+// on the same screen an employee uses. Recording that as hand-typed would put a
+// false statement about how the hours were produced into an append-only payroll
+// record, and drop the row out of the queue's triage ordering.
+import { readAiVerdict } from "@/lib/aws/jwt";
+import { aiFieldsFrom, aiConfidenceFrom, aiStatusFrom } from "@/lib/aws/ai-fields";
 
 export const runtime = "nodejs";
 
@@ -132,6 +142,20 @@ export async function POST(request) {
   if (totals.total <= 0) {
     return bad("this timesheet has no hours on any day — nothing to file");
   }
+
+  // ---- did an AI really read a document for this filing? ------------------
+  // Verified against `user.id` — THE CALLER — and never against the employee
+  // the hours are for. /api/process signed this receipt for the person who ran
+  // the extraction, which on an on-behalf filing is the admin; the employee has
+  // not touched that route and holds no receipt. Checking it against the target
+  // would invert the binding and turn the stamp into a bearer token: any
+  // receipt for any person would authenticate any filing about them.
+  //
+  // The unsigned review_status/flow sitting beside it in the payload stay
+  // ignored, exactly as lib/aws/data.js ignores them.
+  const bodyFields = (body.fields && typeof body.fields === "object" && !Array.isArray(body.fields))
+    ? body.fields : {};
+  const aiVerdict = await readAiVerdict(bodyFields.ai_stamp, user.id);
 
   // Shape-check the new person BEFORE opening a transaction, so a typo'd email
   // is a plain 400 rather than a rolled-back write. The value is carried through
@@ -289,20 +313,25 @@ export async function POST(request) {
     //   * file_id: the document attached to THIS filing wins if one was given,
     //     otherwise the existing one is kept, so the row never points at the
     //     superseded filing's document while carrying the new filing's hours;
-    //   * ai_status/ai_confidence: these hours were typed by an admin, not read
-    //     from a document, so an extraction confidence left over from a
-    //     different day grid would be a lie about the numbers now in the row;
+    //   * ai_status/ai_confidence: these follow the VERIFIED receipt and nothing
+    //     else. A hand-typed filing carries no receipt and stays 'manual' with a
+    //     null confidence, exactly as before; an AI-assisted one records 'ok' and
+    //     the confidence the extraction actually reported, taken from the signed
+    //     stamp rather than from the number sitting next to it in the payload.
+    //     Either way the figure describes THESE hours: a stale confidence left
+    //     over from a different day grid would be a lie about the numbers in the
+    //     row, which is why the conflict branch overwrites rather than coalesces;
     //   * draft: the period is filed. Leaving a draft blob here re-offers the
     //     employee a resume card whose hours are now these hours — and lets them
     //     submit against an approved period. The mandatory note on this filing is
     //     the record of why their in-progress version was replaced.
-    const bodyFields = (body.fields && typeof body.fields === "object") ? body.fields : {};
     const tsId = (await client.query(
       `insert into public.ts_timesheets as t
          (user_id, file_id, month, year, employee_name, employee_id, client,
           days, questionnaire, validation,
-          monthly_regular, monthly_overtime, monthly_total, days_worked, ai_status)
-       values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,'{}'::jsonb,$10,$11,$12,$13,'manual')
+          monthly_regular, monthly_overtime, monthly_total, days_worked,
+          ai_status, ai_confidence)
+       values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,'{}'::jsonb,$10,$11,$12,$13,$14,$15)
        on conflict (user_id, year, month) do update
           set employee_name    = coalesce(t.employee_name, excluded.employee_name),
               employee_id      = coalesce(t.employee_id,   excluded.employee_id),
@@ -314,7 +343,7 @@ export async function POST(request) {
               monthly_total    = excluded.monthly_total,
               days_worked      = excluded.days_worked,
               ai_status        = excluded.ai_status,
-              ai_confidence    = null,
+              ai_confidence    = excluded.ai_confidence,
               draft            = null
        returning id`,
       [targetUserId, fileId, month, year,
@@ -323,7 +352,8 @@ export async function POST(request) {
        bodyFields.client || prof.client || null,
        JSON.stringify(days),
        JSON.stringify(body.questionnaire && typeof body.questionnaire === "object" ? body.questionnaire : {}),
-       totals.regular, totals.overtime, totals.total, totals.daysWorked]
+       totals.regular, totals.overtime, totals.total, totals.daysWorked,
+       aiStatusFrom(aiVerdict), aiConfidenceFrom(aiVerdict)]
     )).rows[0].id;
 
     // ---- the record of record ---------------------------------------------
@@ -366,15 +396,22 @@ export async function POST(request) {
     // `by_role` records which privileged role actually did it, so an HR filing is
     // distinguishable from an admin one without changing what `origin` means to
     // the existing readers.
+    //
+    // `ai_stamp` and any client-supplied `entry` are stripped BEFORE the spread,
+    // not overwritten after it: the receipt is an input like `days` and has no
+    // place in the stored record, and `entry` is the server's word about who
+    // filed this — the same two deletions lib/aws/data.js makes.
+    const { ai_stamp: _receipt, entry: _clientEntry, ...carriedFields } = bodyFields;
     const fields = {
-      ...bodyFields,
+      ...carriedFields,
       employee_name: prof.full_name || bodyFields.employee_name || null,
       employee_id: prof.employee_code || bodyFields.employee_id || null,
       client: bodyFields.client || prof.client || null,
       totals,                 // server-derived; the client's numbers are ignored
-      review_status: null,    // no AI ran — this is not an extraction
-      flow: null,
-      agent_trace: null,
+      // review_status / flow / agent_trace: from the VERIFIED receipt only, via
+      // the module /api/data uses for the identical decision. No receipt means
+      // all three are null, which says what it means — no AI ran on this filing.
+      ...aiFieldsFrom(aiVerdict, bodyFields),
       entry: {
         origin: forSelf ? "self" : "admin",
         by_id: user.id,
@@ -517,6 +554,11 @@ export async function POST(request) {
       total: result.totals.total, regular: result.totals.regular,
       overtime: result.totals.overtime,
       origin: forSelf ? "self" : "admin", by_role: user.role,
+      // How the hours were PRODUCED, from the verified receipt — so the audit
+      // trail distinguishes "an admin typed these" from "an admin accepted what
+      // the AI read". Both are legitimate; conflating them is not.
+      ai_status: aiStatusFrom(aiVerdict),
+      ai_review_status: aiVerdict?.reviewStatus ?? null,
       status: result.status, mode,
       createdPerson: createdPerson ? createdPerson.id : null,
       supersededRows: result.superseded, note,
